@@ -1,0 +1,12 @@
+.vs/
+.idea/
+_ReSharper.Caches/
+
+bin/
+obj/
+
+include/references/
+
+tools/
+
+*.user
