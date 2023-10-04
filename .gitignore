@@ -10,3 +10,5 @@ include/references/
 tools/
 
 *.user
+
+.nuke/temp/

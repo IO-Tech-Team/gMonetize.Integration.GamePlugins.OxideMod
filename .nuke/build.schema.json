@@ -76,6 +76,8 @@
           "items": {
             "type": "string",
             "enum": [
+              "CleanReferencesDir",
+              "CreateDepotDownloaderFileList",
               "GetCurrentDepotDownloaderVersion",
               "UpdateDepotDownloader",
               "UpdateOriginalLibs",
@@ -90,6 +92,8 @@
           "items": {
             "type": "string",
             "enum": [
+              "CleanReferencesDir",
+              "CreateDepotDownloaderFileList",
               "GetCurrentDepotDownloaderVersion",
               "UpdateDepotDownloader",
               "UpdateOriginalLibs",
