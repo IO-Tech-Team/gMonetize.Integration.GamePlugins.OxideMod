@@ -201,6 +201,20 @@ namespace Oxide.Plugins
                         new CuiElement
                         {
                             Parent = Names.MAIN_BACKGROUND,
+                            Name = Names.MAIN_BACKGROUND_OVERLAY,
+                            Components =
+                            {
+                                new CuiImageComponent { Color = "0 0 0 0.8" },
+                                new CuiRectTransformComponent
+                                {
+                                    AnchorMin = "0 0",
+                                    AnchorMax = "1 1"
+                                }
+                            }
+                        },
+                        new CuiElement
+                        {
+                            Parent = Names.MAIN_BACKGROUND,
                             Name = Names.MAIN_CONTAINER,
                             Components =
                             {
@@ -232,10 +246,10 @@ namespace Oxide.Plugins
                             Name = Names.TITLE_BACKGROUND,
                             Components =
                             {
-                                new CuiImageComponent { Color = "0.45 0.45 0.4 0.8" },
+                                new CuiImageComponent { Color = "0.5 0.5 0.5 0.7" },
                                 new CuiRectTransformComponent
                                 {
-                                    AnchorMin = "0.065 0",
+                                    AnchorMin = "0.067 0",
                                     AnchorMax = "0.965 1"
                                 }
                             }
@@ -250,7 +264,7 @@ namespace Oxide.Plugins
                                 {
                                     Text = "gMonetize",
                                     Align = TextAnchor.MiddleCenter,
-                                    Color = "0.65 0.65 0.5 0.8"
+                                    Color = "0.7 0.7 0.7 0.8"
                                 },
                                 new CuiRectTransformComponent
                                 {
@@ -279,11 +293,11 @@ namespace Oxide.Plugins
                             Name = Names.CLOSE_BTN,
                             Components =
                             {
-                                new CuiButtonComponent { Color = "0.6 0.2 0.2 0.8", },
+                                new CuiButtonComponent { Color = "0.7 0.4 0.4 0.8", },
                                 new CuiRectTransformComponent
                                 {
                                     AnchorMin = "0.97 0",
-                                    AnchorMax = "0.999 1"
+                                    AnchorMax = "1 1"
                                 }
                             }
                         },
@@ -310,8 +324,14 @@ namespace Oxide.Plugins
                     components.AddRange(PaginationButtons(true, true));
                     components.Add(ItemListContainer());
                     components.AddRange(
-                        ItemCard(Guid.NewGuid().ToString(), "Some item", 99, "", true)
+                        ItemCard(0, Guid.NewGuid().ToString(), "Some item", 99, "", true)
                     );
+                    components.AddRange(ItemCard(1, Guid.NewGuid().ToString(), "Some item", 99, "", true));
+                    components.AddRange(ItemCard(8, Guid.NewGuid().ToString(), "Some item", 99, "", true));
+                    components.AddRange(ItemCard(7, Guid.NewGuid().ToString(), "Some item", 99, "", true));
+                    components.AddRange(ItemCard(15, Guid.NewGuid().ToString(), "Some item", 99, "", true));
+
+                    components.AddRange(Notification("Your mom", "Is very fat, Im surprised she hasn't eat you yet"));
 
                     return CuiHelper.ToJson(components);
                 }
@@ -326,7 +346,7 @@ namespace Oxide.Plugins
                             Name = Names.PAGINATION_BTN_PREV,
                             Components =
                             {
-                                new CuiButtonComponent { Color = "0.45 0.45 0.4 0.8" },
+                                new CuiButtonComponent { Color = "0.5 0.5 0.5 0.7" },
                                 new CuiRectTransformComponent
                                 {
                                     AnchorMin = "0 0",
@@ -343,7 +363,7 @@ namespace Oxide.Plugins
                                 new CuiRawImageComponent
                                 {
                                     Url = "https://i.imgur.com/TiYyODy.png",
-                                    Color = "0.85 0.85 0.8 0.6"
+                                    Color = "0.8 0.8 0.8 0.6"
                                 },
                                 new CuiRectTransformComponent
                                 {
@@ -358,7 +378,7 @@ namespace Oxide.Plugins
                             Name = Names.PAGINATION_BTN_NEXT,
                             Components =
                             {
-                                new CuiButtonComponent { Color = "0.45 0.45 0.4 0.8" },
+                                new CuiButtonComponent { Color = "0.5 0.5 0.5 0.7" },
                                 new CuiRectTransformComponent
                                 {
                                     AnchorMin = "0.525 0",
@@ -375,7 +395,7 @@ namespace Oxide.Plugins
                                 new CuiRawImageComponent
                                 {
                                     Url = "https://i.imgur.com/tBYlfGM.png",
-                                    Color = "0.85 0.85 0.8 0.6"
+                                    Color = "0.8 0.8 0.8 0.6"
                                 },
                                 new CuiRectTransformComponent
                                 {
@@ -385,6 +405,86 @@ namespace Oxide.Plugins
                             }
                         }
                     };
+                }
+
+                public static IEnumerable<CuiElement> Notification(string title, string text)
+                {
+                    var components = new List<CuiElement>
+                    {
+                        new CuiElement
+                        {
+                            Parent = Names.MAIN_CONTAINER,
+                            Name = Names.NOTIFICATION_CONTAINER,
+                            Components =
+                            {
+                                new CuiImageComponent { Color = "0 0 0 0" },
+                                new CuiRectTransformComponent
+                                {
+                                    AnchorMin = "0.415 0.475",
+                                    AnchorMax = "0.715 0.525"
+                                }
+                            }
+                        },
+                        new CuiElement
+                        {
+                            Parent = Names.NOTIFICATION_CONTAINER,
+                            Name = Names.NOTIFICATION_ICON,
+                            Components =
+                            {
+                                new CuiRawImageComponent
+                                {
+                                    Url = "https://i.imgur.com/zeCzK3i.png",
+                                    Color = "1 1 1 0.6"
+                                },
+                                new CuiRectTransformComponent
+                                {
+                                    AnchorMin = "0 0",
+                                    AnchorMax = "0.1 1"
+                                }
+                            }
+                        },
+                        new CuiElement
+                        {
+                            Parent = Names.NOTIFICATION_CONTAINER,
+                            Name = Names.NOTIFICATION_TITLE,
+                            Components =
+                            {
+                                new CuiTextComponent
+                                {
+                                    Text = title,
+                                    FontSize = 10,
+                                    Align = TextAnchor.LowerLeft
+                                },
+                                new CuiRectTransformComponent
+                                {
+                                    AnchorMin = "0.12 0.5",
+                                    AnchorMax = "1 1"
+                                }
+                            }
+                        },
+                        new CuiElement
+                        {
+                            Parent = Names.NOTIFICATION_CONTAINER,
+                            Name = Names.NOTIFICATION_MESSAGE,
+                            Components =
+                            {
+                                new CuiTextComponent
+                                {
+                                    Text = text,
+                                    FontSize = 8,
+                                    Align = TextAnchor.MiddleLeft,
+                                    Color = "0.8 0.8 0.8 0.8"
+                                },
+                                new CuiRectTransformComponent
+                                {
+                                    AnchorMin = "0.12 0",
+                                    AnchorMax = "1 0.6"
+                                }
+                            }
+                        }
+                    };
+
+                    return components;
                 }
 
                 public static CuiElement ItemListContainer()
@@ -406,6 +506,7 @@ namespace Oxide.Plugins
                 }
 
                 public static IEnumerable<CuiElement> ItemCard(
+                    int containerIndex,
                     string id,
                     string name,
                     int amount,
@@ -423,11 +524,148 @@ namespace Oxide.Plugins
                             Name = uiName.Container,
                             Components =
                             {
-                                new CuiImageComponent { Color = "0.45 0.45 0.4 0.6" },
+                                new CuiImageComponent { Color = "0.5 0.5 0.5 0.7" },
+                                GridTransform(containerIndex, 8, 4, .005f, .01f)
+                            }
+                        },
+                        new CuiElement
+                        {
+                            Parent = uiName.Container,
+                            Name = uiName.FooterContainer,
+                            Components =
+                            {
+                                new CuiImageComponent {Color = "0 0 0 0"},
                                 new CuiRectTransformComponent
                                 {
-                                    AnchorMin = "0 0.8",
-                                    AnchorMax = "0.1 1"
+                                    AnchorMin = "0.05 0.05",
+                                    AnchorMax = "0.95 0.25"
+                                }
+                            }
+                        },
+                        new CuiElement
+                        {
+                            Parent = uiName.FooterContainer,
+                            Name = uiName.TextContainer,
+                            Components =
+                            {
+                                new CuiImageComponent {Color = "0 0 0 0"},
+                                new CuiRectTransformComponent
+                                {
+                                    AnchorMin = "0 0",
+                                    AnchorMax = "0.5 1"
+                                }
+                            }
+                        },
+                        new CuiElement
+                        {
+                            Parent = uiName.TextContainer,
+                            Name = uiName.NameText,
+                            Components =
+                            {
+                                new CuiTextComponent
+                                {
+                                    Text = name,
+                                    FontSize = 12,
+                                    Font = Fonts.ROBOTOCONDENSED_REGULAR,
+                                    Align = TextAnchor.MiddleLeft
+                                },
+                                new CuiRectTransformComponent
+                                {
+                                    AnchorMin = "0 0.5",
+                                    AnchorMax = "1 1"
+                                }
+                            }
+                        },
+                        new CuiElement
+                        {
+                            Parent = uiName.TextContainer,
+                            Name = uiName.AmountText,
+                            Components =
+                            {
+                                new CuiTextComponent
+                                {
+                                    Text = 'x' + amount.ToString(),
+                                    FontSize = 10,
+                                    Color = "0.7 0.7 0.7 0.8",
+                                    Align = TextAnchor.LowerLeft
+                                },
+                                new CuiRectTransformComponent
+                                {
+                                    AnchorMin = "0 0",
+                                    AnchorMax = "1 0.5"
+                                }
+                            }
+                        },
+                        new CuiElement
+                        {
+                            Parent = uiName.FooterContainer,
+                            Name = uiName.Btn,
+                            Components =
+                            {
+                                new CuiButtonComponent
+                                {
+                                    Color = "0.5 0.65 0.5 0.7"
+                                },
+                                new CuiRectTransformComponent
+                                {
+                                    AnchorMin = "0.5 0",
+                                    AnchorMax = "0.99 1"
+                                }
+                            }
+                        },
+                        new CuiElement
+                        {
+                            Parent = uiName.Btn,
+                            Name = uiName.BtnText,
+                            Components =
+                            {
+                                new CuiTextComponent
+                                {
+                                    Text = "Redeem",
+                                    FontSize = 10,
+                                    Align = TextAnchor.MiddleCenter,
+                                    Color = "0.7 0.85 0.7 0.85",
+                                    Font = Fonts.ROBOTOCONDENSED_REGULAR
+                                },
+                                new CuiRectTransformComponent
+                                {
+                                    AnchorMin = "0.25 0",
+                                    AnchorMax = "1 1"
+                                }
+                            }
+                        },
+                        new CuiElement
+                        {
+                            Parent = uiName.Btn,
+                            Name = uiName.Icon,
+                            Components =
+                            {
+                                new CuiRawImageComponent
+                                {
+                                    Url = "https://i.imgur.com/xEwbjZ0.png",
+                                    Color = "0.7 0.85 0.7 0.85",
+                                },
+                                new CuiRectTransformComponent
+                                {
+                                    AnchorMin = "0.02 0.28",
+                                    AnchorMax = "0.3 0.74"
+                                }
+                            }
+                        },
+                        new CuiElement
+                        {
+                            Parent = uiName.Container,
+                            Name = uiName.Icon,
+                            Components =
+                            {
+                                new CuiRawImageComponent
+                                {
+                                    Url = "https://i.imgur.com/mOkDtvt.png"
+                                },
+                                new CuiRectTransformComponent
+                                {
+                                    AnchorMin = "0.04 0.3",
+                                    AnchorMax = "0.946 0.95"
                                 }
                             }
                         }
@@ -435,11 +673,48 @@ namespace Oxide.Plugins
 
                     return components;
                 }
+
+                private static CuiRectTransformComponent GridTransform(
+                    int containerIndex,
+                    int columnCount,
+                    int rowCount,
+                    float columnGap,
+                    float rowGap
+                )
+                {
+                    int columnGapCount = columnCount - 1;
+                    int rowGapCount = rowCount - 1;
+
+                    float totalColumnGap = columnGap * columnGapCount;
+                    float totalRowGap = rowGap * rowGapCount;
+
+                    float cardWidth = (1.0f - totalColumnGap) / columnCount;
+                    float cardHeight = (1.0f - totalRowGap) / rowCount;
+
+                    int columnIndex = containerIndex % columnCount;
+                    int rowIndex = containerIndex / columnCount;
+
+                    float sumColumnGap = columnGap * columnIndex;
+                    float sumRowGap = rowGap * rowIndex;
+
+                    float sumPrevCardWidth = cardWidth * columnIndex;
+                    float sumPrevCardHeight = cardHeight * (rowIndex + 1);
+
+                    float offsetX = sumColumnGap + sumPrevCardWidth;
+                    float offsetY = 1.0f - (sumRowGap + sumPrevCardHeight);
+
+                    return new CuiRectTransformComponent
+                    {
+                        AnchorMin = $"{offsetX} {offsetY}",
+                        AnchorMax = $"{offsetX + cardWidth} {offsetY + cardHeight}"
+                    };
+                }
             }
 
             private static class Names
             {
                 public const string MAIN_BACKGROUND = "gmonetize/main/background";
+                public const string MAIN_BACKGROUND_OVERLAY = "gmonetize/main/background/overlay";
                 public const string MAIN_CONTAINER = "gmonetize/main/container";
                 public const string HEADER_CONTAINER = "gmonetize/header/container";
                 public const string TITLE_BACKGROUND = "gmonetize/header/title/background";
@@ -452,6 +727,18 @@ namespace Oxide.Plugins
                 public const string CLOSE_BTN = "gmonetize/close-btn";
                 public const string CLOSE_BTN_ICON = "gmonetize/close-btn/icon";
                 public const string ITEMLIST_CONTAINER = "gmonetize/itemlist/container";
+                public const string NOTIFICATION_CONTAINER = "gmonetize/notification/container";
+                public const string NOTIFICATION_ICON = "gmonetize/notification/icon";
+                public const string NOTIFICATION_TITLE = "gmonetize/notification/title";
+                public const string NOTIFICATION_MESSAGE = "gmonetize/notification/message";
+                public const string NOTIFICATION_BTN = "gmonetize/notification/btn";
+                public const string NOTIFICATION_BTN_TEXT = "gmonetize/notification/btn/text";
+
+                /*public const string NOTIFICATION_TITLE_BACKGROUND = "gmonetize/notification/title/background";
+                public const string NOTIFICATION_TITLE_TEXT = "gmonetize/notification/title/text";
+                public const string NOTIFICATION_MESSAGE = "gmonetize/notification/message";
+                public const string NOTIFICATION_BTN = "gmonetize/notification/btn";
+                public const string NOTIFICATION_BTN_TEXT = "gmonetize/notification/btn/text";*/
 
                 public static ItemCardName ItemCard(string id)
                 {
@@ -494,6 +781,12 @@ namespace Oxide.Plugins
             {
                 public const string BACKGROUND_BLUR_INGAMEMENU =
                     "assets/content/ui/uibackgroundblur-ingamemenu.mat";
+            }
+
+            private static class Fonts
+            {
+                public const string ROBOTOCONDENSED_REGULAR = "robotocondensed-regular.ttf";
+                public const string ROBOTOCONDENSED_BOLD = "robotocondensed.ttf";
             }
         }
 
