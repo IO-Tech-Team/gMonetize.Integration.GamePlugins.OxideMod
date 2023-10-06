@@ -323,15 +323,38 @@ namespace Oxide.Plugins
 
                     components.AddRange(PaginationButtons(true, true));
                     components.Add(ItemListContainer());
-                    components.AddRange(
-                        ItemCard(0, Guid.NewGuid().ToString(), "Some item", 99, "", true)
-                    );
-                    components.AddRange(ItemCard(1, Guid.NewGuid().ToString(), "Some item", 99, "", true));
-                    components.AddRange(ItemCard(8, Guid.NewGuid().ToString(), "Some item", 99, "", true));
-                    components.AddRange(ItemCard(7, Guid.NewGuid().ToString(), "Some item", 99, "", true));
-                    components.AddRange(ItemCard(15, Guid.NewGuid().ToString(), "Some item", 99, "", true));
 
-                    components.AddRange(Notification("Your mom", "Is very fat, Im surprised she hasn't eat you yet"));
+                    ICuiComponent iconComponent = new CuiRawImageComponent
+                    {
+                        Url = "https://i.imgur.com/mOkDtvt.png"
+                    };
+
+                    components.AddRange(
+                        ItemCard(0, Guid.NewGuid().ToString(), "Some item", 99, iconComponent, false)
+                    );
+                    components.AddRange(
+                        ItemCard(1, Guid.NewGuid().ToString(), "Some item", 99, iconComponent, true)
+                    );
+                    components.AddRange(
+                        ItemCard(8, Guid.NewGuid().ToString(), "Some item", 99, iconComponent, true)
+                    );
+                    components.AddRange(
+                        ItemCard(7, Guid.NewGuid().ToString(), "Some item", 99, iconComponent, true)
+                    );
+                    components.AddRange(
+                        ItemCard(
+                            15,
+                            Guid.NewGuid().ToString(),
+                            "Some item",
+                            99,
+                            iconComponent,
+                            true
+                        )
+                    );
+
+                    components.AddRange(
+                        Notification("Your mom", "Is very fat, Im surprised she hasn't eat you yet")
+                    );
 
                     return CuiHelper.ToJson(components);
                 }
@@ -510,7 +533,7 @@ namespace Oxide.Plugins
                     string id,
                     string name,
                     int amount,
-                    string iconUrl,
+                    ICuiComponent icon,
                     bool canRedeem
                 )
                 {
@@ -534,7 +557,7 @@ namespace Oxide.Plugins
                             Name = uiName.FooterContainer,
                             Components =
                             {
-                                new CuiImageComponent {Color = "0 0 0 0"},
+                                new CuiImageComponent { Color = "0 0 0 0" },
                                 new CuiRectTransformComponent
                                 {
                                     AnchorMin = "0.05 0.05",
@@ -548,7 +571,7 @@ namespace Oxide.Plugins
                             Name = uiName.TextContainer,
                             Components =
                             {
-                                new CuiImageComponent {Color = "0 0 0 0"},
+                                new CuiImageComponent { Color = "0 0 0 0" },
                                 new CuiRectTransformComponent
                                 {
                                     AnchorMin = "0 0",
@@ -598,70 +621,11 @@ namespace Oxide.Plugins
                         },
                         new CuiElement
                         {
-                            Parent = uiName.FooterContainer,
-                            Name = uiName.Btn,
-                            Components =
-                            {
-                                new CuiButtonComponent
-                                {
-                                    Color = "0.5 0.65 0.5 0.7"
-                                },
-                                new CuiRectTransformComponent
-                                {
-                                    AnchorMin = "0.5 0",
-                                    AnchorMax = "0.99 1"
-                                }
-                            }
-                        },
-                        new CuiElement
-                        {
-                            Parent = uiName.Btn,
-                            Name = uiName.BtnText,
-                            Components =
-                            {
-                                new CuiTextComponent
-                                {
-                                    Text = "Redeem",
-                                    FontSize = 10,
-                                    Align = TextAnchor.MiddleCenter,
-                                    Color = "0.7 0.85 0.7 0.85",
-                                    Font = Fonts.ROBOTOCONDENSED_REGULAR
-                                },
-                                new CuiRectTransformComponent
-                                {
-                                    AnchorMin = "0.25 0",
-                                    AnchorMax = "1 1"
-                                }
-                            }
-                        },
-                        new CuiElement
-                        {
-                            Parent = uiName.Btn,
-                            Name = uiName.Icon,
-                            Components =
-                            {
-                                new CuiRawImageComponent
-                                {
-                                    Url = "https://i.imgur.com/xEwbjZ0.png",
-                                    Color = "0.7 0.85 0.7 0.85",
-                                },
-                                new CuiRectTransformComponent
-                                {
-                                    AnchorMin = "0.02 0.28",
-                                    AnchorMax = "0.3 0.74"
-                                }
-                            }
-                        },
-                        new CuiElement
-                        {
                             Parent = uiName.Container,
                             Name = uiName.Icon,
                             Components =
                             {
-                                new CuiRawImageComponent
-                                {
-                                    Url = "https://i.imgur.com/mOkDtvt.png"
-                                },
+                                icon,
                                 new CuiRectTransformComponent
                                 {
                                     AnchorMin = "0.04 0.3",
@@ -670,6 +634,85 @@ namespace Oxide.Plugins
                             }
                         }
                     };
+
+
+                    string btnColor, btnIconUrl, btnText, btnIconColor, btnTextColor;
+                    
+                    if (canRedeem)
+                    {
+                        btnColor = "0.5 0.65 0.5 0.7";
+                        btnTextColor = "0.7 0.85 0.7 0.85";
+                        btnIconColor = "0.7 0.85 0.7 0.85";
+                        btnIconUrl = "https://i.imgur.com/xEwbjZ0.png";
+                        btnText = "Redeem";
+                    }
+                    else
+                    {
+                        btnColor = "0.5 0.5 0.5 0.7";
+                        btnTextColor = "0.65 0.65 0.65 0.85";
+                        btnIconColor = "0.6 0.6 0.6 0.85";
+                        btnIconUrl = "https://i.imgur.com/xEwbjZ0.png";
+                        btnText = "No\nspace";
+                    }
+                    
+                    components.AddRange(
+                            new[]
+                            {
+                                new CuiElement
+                                {
+                                    Parent = uiName.FooterContainer,
+                                    Name = uiName.Btn,
+                                    Components =
+                                    {
+                                        new CuiButtonComponent { Color = btnColor },
+                                        new CuiRectTransformComponent
+                                        {
+                                            AnchorMin = "0.5 0",
+                                            AnchorMax = "0.99 1"
+                                        }
+                                    }
+                                },
+                                new CuiElement
+                                {
+                                    Parent = uiName.Btn,
+                                    Name = uiName.BtnText,
+                                    Components =
+                                    {
+                                        new CuiTextComponent
+                                        {
+                                            Text = btnText,
+                                            FontSize = 10,
+                                            Align = TextAnchor.MiddleCenter,
+                                            Color = btnTextColor,
+                                            Font = Fonts.ROBOTOCONDENSED_REGULAR
+                                        },
+                                        new CuiRectTransformComponent
+                                        {
+                                            AnchorMin = "0.25 0",
+                                            AnchorMax = "1 1"
+                                        }
+                                    }
+                                },
+                                new CuiElement
+                                {
+                                    Parent = uiName.Btn,
+                                    Name = uiName.BtnIcon,
+                                    Components =
+                                    {
+                                        new CuiRawImageComponent
+                                        {
+                                            Url = btnIconUrl,
+                                            Color = btnIconColor,
+                                        },
+                                        new CuiRectTransformComponent
+                                        {
+                                            AnchorMin = "0.02 0.28",
+                                            AnchorMax = "0.3 0.74"
+                                        }
+                                    }
+                                }
+                            }
+                        );
 
                     return components;
                 }
