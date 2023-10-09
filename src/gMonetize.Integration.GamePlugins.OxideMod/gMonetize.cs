@@ -5,9 +5,12 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
+using System.Linq;
+using JetBrains.Annotations;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Converters;
 using Oxide.Core;
+using Oxide.Core.Libraries;
 using Oxide.Core.Libraries.Covalence;
 using Oxide.Game.Rust.Cui;
 using UnityEngine;
@@ -68,6 +71,7 @@ namespace Oxide.Plugins
 
         private void OnServerInitialized()
         {
+            RegisterCommands();
             foreach (IPlayer player in players.Connected)
             {
                 OnUserConnected(player);
@@ -106,34 +110,73 @@ namespace Oxide.Plugins
             covalence.RegisterCommand(CMD_PREV_PAGE, this, HandleCommand);
             covalence.RegisterCommand(CMD_RETRY_LOAD, this, HandleCommand);
             covalence.RegisterCommand(CMD_REDEEM_ITEM, this, HandleCommand);
+            covalence.RegisterCommand("shop", this, HandleCommand);
         }
 
         private bool HandleCommand(IPlayer player, string command, string[] args)
         {
+            BasePlayer basePlayer = player.Object as BasePlayer;
+
+            if (!basePlayer)
+            {
+                LogError(
+                    "BasePlayer not found while calling cmd {0} on player {1}",
+                    command,
+                    player
+                );
+                return true;
+            }
+
+            LogDebug("Command {0} by player {1}", command, player);
+
             switch (command)
             {
-                case CMD_OPEN:
-
-                    break;
-
                 case CMD_CLOSE:
-
+                    basePlayer.SendMessage(nameof(UI.gMonetize_CloseUI));
                     break;
 
                 case CMD_NEXT_PAGE:
-
+                    basePlayer.SendMessage(nameof(UI.gMonetize_NextPage));
                     break;
 
                 case CMD_PREV_PAGE:
-
+                    basePlayer.SendMessage(nameof(UI.gMonetize_PreviousPage));
                     break;
 
                 case CMD_RETRY_LOAD:
-
+                    APIClient.GetPlayerInventory(
+                        player.Id,
+                        items =>
+                            basePlayer.SendMessage(nameof(UI.gMonetize_InventoryReceived), items),
+                        code =>
+                            basePlayer.SendMessage(nameof(UI.gMonetize_InventoryReceiveFail), code)
+                    );
+                    basePlayer.SendMessage(nameof(UI.gMonetize_LoadingItems));
                     break;
 
                 case CMD_REDEEM_ITEM:
 
+                    break;
+
+                default:
+                    if (command == CMD_OPEN || _settings.ChatCommands.Contains(command))
+                    {
+                        basePlayer.SendMessage(nameof(UI.gMonetize_OpenUI));
+                        APIClient.GetPlayerInventory(
+                            player.Id,
+                            items =>
+                                basePlayer.SendMessage(
+                                    nameof(UI.gMonetize_InventoryReceived),
+                                    items
+                                ),
+                            code =>
+                                basePlayer.SendMessage(
+                                    nameof(UI.gMonetize_InventoryReceiveFail),
+                                    code
+                                )
+                        );
+                        basePlayer.SendMessage(nameof(UI.gMonetize_LoadingItems));
+                    }
                     break;
             }
 
@@ -145,9 +188,80 @@ namespace Oxide.Plugins
             return (basePlayer = player.Object as BasePlayer) != null;
         }
 
+        private bool CanRedeemItem(BasePlayer player, APIClient.InventoryEntryDto inventoryEntry)
+        {
+            switch (inventoryEntry.type)
+            {
+                case APIClient.InventoryEntryDto.InventoryEntryType.ITEM:
+                    return GetPlayerAvailableSlots(player) > 0;
+                case APIClient.InventoryEntryDto.InventoryEntryType.KIT:
+
+                    break;
+                case APIClient.InventoryEntryDto.InventoryEntryType.RESEARCH:
+                    return !player.blueprints.IsUnlocked(
+                        ItemManager.FindItemDefinition(inventoryEntry.research.researchId)
+                    );
+                case APIClient.InventoryEntryDto.InventoryEntryType.CUSTOM:
+                    break;
+
+                default:
+                    return true;
+            }
+
+            return true;
+        }
+
+        private int GetPlayerAvailableSlots(BasePlayer player)
+        {
+            int containerMainSlots = player.inventory.containerMain.capacity;
+            int containerBeltSlots = player.inventory.containerBelt.capacity;
+            int containerMainItems = player.inventory.containerMain.itemList.Count;
+            int containerBeltItems = player.inventory.containerBelt.itemList.Count;
+
+            // TODO: Take stacking into account
+
+            return containerMainSlots
+                + containerBeltSlots
+                - containerMainItems
+                - containerBeltItems;
+        }
+
         private class UI : FacepunchBehaviour
         {
+            private const int ITEMS_PER_PAGE = 8 * 4;
+
             private BasePlayer _player;
+
+            private bool _isOpen,
+                _isItemListContainerDrawn;
+            private NotificationState _notificationState;
+
+            private List<APIClient.InventoryEntryDto> _inventory;
+
+            private int _currentPageId;
+
+            private int PageCount()
+            {
+                if (_inventory == null)
+                {
+                    return 0;
+                }
+
+                int fullPages = _inventory.Count / ITEMS_PER_PAGE;
+                int remainingPages = _inventory.Count % ITEMS_PER_PAGE == 0 ? 0 : 1;
+
+                return fullPages + remainingPages;
+            }
+
+            private bool HasNextPage()
+            {
+                return _currentPageId < PageCount() - 1;
+            }
+
+            private bool HasPreviousPage()
+            {
+                return _currentPageId > 0;
+            }
 
             private void Awake()
             {
@@ -160,25 +274,354 @@ namespace Oxide.Plugins
                 }
             }
 
-            private void Start()
+            private List<APIClient.InventoryEntryDto> CurrentPageItems()
             {
-                LogDebug("UI.Start() on player {0}", _player.IPlayer);
-
-                CuiHelper.AddUi(_player, Builder.Base());
+                return _inventory
+                    .Skip(ITEMS_PER_PAGE * _currentPageId)
+                    .Take(ITEMS_PER_PAGE)
+                    .ToList();
             }
 
             private void OnDestroy()
             {
-                LogDebug("UI.OnDestroy() on player {0}", _player.IPlayer);
+                CloseAndReleaseInventory();
+            }
 
-                CuiHelper.DestroyUi(_player, Names.MAIN_BACKGROUND);
+            public void gMonetize_OpenUI()
+            {
+                if (_isOpen)
+                    return;
+
+                CuiHelper.AddUi(_player, Builder.Base());
+                DrawPaginationButtons(true);
+                _isOpen = true;
+            }
+
+            public void gMonetize_LoadingItems() =>
+                DrawNotification(NotificationState.LoadingItems);
+
+            public void gMonetize_CloseUI()
+            {
+                CloseAndReleaseInventory();
+            }
+
+            public void gMonetize_ItemClaimedOk(APIClient.InventoryEntryDto inventoryEntry) { }
+
+            public void gMonetize_ItemClaimedError(APIClient.InventoryEntryDto inventoryEntry) { }
+
+            public void gMonetize_InventoryReceived(
+                List<APIClient.InventoryEntryDto> inventoryEntries
+            )
+            {
+                _currentPageId = 0;
+
+                if (!_isOpen)
+                    return;
+
+                if (!inventoryEntries.Any())
+                {
+                    DrawNotification(NotificationState.InventoryEmpty);
+                    return;
+                }
+
+                _inventory = inventoryEntries;
+                RemoveNotification();
+                DrawInventoryPage();
+                DrawPaginationButtons();
+            }
+
+            public void gMonetize_InventoryReceiveFail(int errorCode)
+            {
+                if (!_isOpen)
+                    return;
+
+                switch (errorCode)
+                {
+                    case 404:
+                        DrawNotification(NotificationState.CustomerNotFound);
+                        break;
+
+                    case 401:
+                        DrawNotification(NotificationState.Unauthorized);
+                        break;
+
+                    default:
+                        DrawNotification(NotificationState.UnknownError);
+                        break;
+                }
+            }
+
+            public void gMonetize_PreviousPage()
+            {
+                if (!HasPreviousPage() || !_isOpen)
+                {
+                    return;
+                }
+
+                RemoveCurrentPageItems();
+                _currentPageId--;
+                DrawInventoryPage();
+                DrawPaginationButtons();
+            }
+
+            public void gMonetize_NextPage()
+            {
+                if (!HasNextPage() || !_isOpen)
+                {
+                    return;
+                }
+
+                RemoveCurrentPageItems();
+                _currentPageId--;
+                DrawInventoryPage();
+                DrawPaginationButtons();
+            }
+
+            private void CloseAndReleaseInventory()
+            {
+                if (_isOpen)
+                {
+                    CuiHelper.DestroyUi(_player, Names.MAIN_BACKGROUND);
+                    _isOpen = false;
+                }
+
+                _isItemListContainerDrawn = false;
+                _notificationState = NotificationState.None;
+                _inventory = null;
+                _currentPageId = 0;
+            }
+
+            private void RemoveCurrentPageItems()
+            {
+                foreach (
+                    Names.ItemCardName cardName in CurrentPageItems()
+                        .Select(item => Names.ItemCard(item.id))
+                )
+                {
+                    CuiHelper.DestroyUi(_player, cardName.Container);
+                }
+            }
+
+            private void DrawPaginationButtons(bool firstTime = false)
+            {
+                if (!firstTime)
+                {
+                    CuiHelper.DestroyUi(_player, Names.PAGINATION_BTN_PREV);
+                    CuiHelper.DestroyUi(_player, Names.PAGINATION_BTN_NEXT);
+                }
+
+                CuiHelper.AddUi(
+                    _player,
+                    Builder.PaginationButtons(HasPreviousPage(), HasNextPage()).ToList()
+                );
+            }
+
+            private void DrawItemListContainer()
+            {
+                if (!_isOpen)
+                {
+                    LogDebug("Calling DrawItemListContainer with _isOpen == false");
+                    return;
+                }
+
+                if (_isItemListContainerDrawn)
+                {
+                    // no warn here, bc it is normal to call this method to just ensure it's drawn
+                    return;
+                }
+
+                CuiHelper.AddUi(_player, new List<CuiElement> { Builder.ItemListContainer() });
+                _isItemListContainerDrawn = true;
+            }
+
+            private void RemoveItemListContainer()
+            {
+                if (!_isOpen || !_isItemListContainerDrawn)
+                {
+                    return;
+                }
+
+                CuiHelper.DestroyUi(_player, Names.ITEMLIST_CONTAINER);
+                _isItemListContainerDrawn = false;
+            }
+
+            private void DrawInventoryPage()
+            {
+                DrawItemListContainer();
+
+                List<APIClient.InventoryEntryDto> itemList = CurrentPageItems();
+                List<CuiElement> componentList = new List<CuiElement>();
+                for (int i = 0; i < itemList.Count; i++)
+                {
+                    APIClient.InventoryEntryDto item = itemList[i];
+                    bool canRedeem = Instance.CanRedeemItem(_player, item);
+                    IEnumerable<CuiElement> card = RenderItemCard(i, item, canRedeem);
+                    componentList.AddRange(card);
+                }
+
+                LogDebug(
+                    "DrawInventoryPage. Itemcount: {0}, Component count: {1}",
+                    itemList.Count,
+                    componentList.Count
+                );
+
+                LogDebug("Components json:\n{0}", CuiHelper.ToJson(componentList));
+
+                CuiHelper.AddUi(_player, componentList);
+            }
+
+            private IEnumerable<CuiElement> RenderItemCard(
+                int containerIndex,
+                APIClient.InventoryEntryDto item,
+                bool canRedeem
+            )
+            {
+                ICuiComponent icon;
+
+                int? amount = null;
+
+                if (item.type == APIClient.InventoryEntryDto.InventoryEntryType.ITEM)
+                {
+                    amount = item.item.amount;
+                }
+
+                if (item.iconId != null)
+                {
+                    icon = new CuiRawImageComponent { Url = APIClient.GetIconUrl(item.iconId) };
+                }
+                else if (item.type == APIClient.InventoryEntryDto.InventoryEntryType.ITEM)
+                {
+                    icon = new CuiImageComponent { ItemId = item.item.itemId };
+                }
+                else
+                {
+                    icon = new CuiRawImageComponent { Url = Icons.ITEM_DEFAULT };
+                }
+
+                IEnumerable<CuiElement> card = Builder.ItemCard(
+                    containerIndex,
+                    item.id,
+                    item.name,
+                    amount,
+                    icon,
+                    canRedeem
+                );
+
+                return card;
+            }
+
+            #region Notifications
+
+            private void DrawNotification(NotificationState state)
+            {
+                if (!_isOpen)
+                {
+                    LogDebug("Calling DrawNotification({0:G}), but _isOpen == false", state);
+
+                    return;
+                }
+
+                if (_notificationState == state)
+                {
+                    return;
+                }
+
+                if (_notificationState != NotificationState.None)
+                {
+                    RemoveNotification();
+                }
+
+                switch (state)
+                {
+                    case NotificationState.Unauthorized:
+                        CuiHelper.AddUi(
+                            _player,
+                            Builder
+                                .Notification(
+                                    "Invalid API key",
+                                    "It's not your fault. Let the admins know!",
+                                    Icons.CLOSE_CROSS
+                                )
+                                .ToList()
+                        );
+                        break;
+                    case NotificationState.LoadingItems:
+                        CuiHelper.AddUi(
+                            _player,
+                            Builder
+                                .Notification(
+                                    "Loading items",
+                                    "Receiving what your mom has paid for...",
+                                    Icons.NOTIFICATION_PENDING
+                                )
+                                .ToList()
+                        );
+                        break;
+                    case NotificationState.CustomerNotFound:
+                        CuiHelper.AddUi(
+                            _player,
+                            Builder
+                                .Notification(
+                                    "Failed to get inventory",
+                                    "You need to be registered in the store",
+                                    Icons.USER_NOT_FOUND
+                                )
+                                .ToList()
+                        );
+                        break;
+
+                    case NotificationState.UnknownError:
+                        CuiHelper.AddUi(
+                            _player,
+                            Builder
+                                .Notification("Unknown error", "Houston, we got problems...")
+                                .ToList()
+                        );
+                        break;
+
+                    case NotificationState.InventoryEmpty:
+                        CuiHelper.AddUi(
+                            _player,
+                            Builder
+                                .Notification("No items", "Looks like your inventory is empty...")
+                                .ToList()
+                        );
+                        break;
+                    default:
+                        throw new ArgumentOutOfRangeException(nameof(state), state, null);
+                }
+
+                _notificationState = state;
+            }
+
+            private void RemoveNotification()
+            {
+                if (!_isOpen || _notificationState == NotificationState.None)
+                {
+                    return;
+                }
+
+                CuiHelper.DestroyUi(_player, Names.NOTIFICATION_CONTAINER);
+            }
+
+            #endregion
+
+
+            private enum NotificationState
+            {
+                None,
+                Unauthorized,
+                LoadingItems,
+                CustomerNotFound,
+                UnknownError,
+                InventoryEmpty
             }
 
             private static class Builder
             {
                 public static string Base()
                 {
-                    var components = new List<CuiElement>
+                    List<CuiElement> components = new List<CuiElement>
                     {
                         new CuiElement
                         {
@@ -293,7 +736,11 @@ namespace Oxide.Plugins
                             Name = Names.CLOSE_BTN,
                             Components =
                             {
-                                new CuiButtonComponent { Color = "0.7 0.4 0.4 0.8", },
+                                new CuiButtonComponent
+                                {
+                                    Color = "0.7 0.4 0.4 0.8",
+                                    Command = CMD_CLOSE
+                                },
                                 new CuiRectTransformComponent
                                 {
                                     AnchorMin = "0.97 0",
@@ -309,7 +756,7 @@ namespace Oxide.Plugins
                             {
                                 new CuiRawImageComponent
                                 {
-                                    Url = "https://i.imgur.com/zeCzK3i.png",
+                                    Url = Icons.CLOSE_CROSS,
                                     Color = "1 1 1 0.6"
                                 },
                                 new CuiRectTransformComponent
@@ -321,46 +768,17 @@ namespace Oxide.Plugins
                         }
                     };
 
-                    components.AddRange(PaginationButtons(true, true));
-                    components.Add(ItemListContainer());
-
-                    ICuiComponent iconComponent = new CuiRawImageComponent
-                    {
-                        Url = "https://i.imgur.com/mOkDtvt.png"
-                    };
-
-                    components.AddRange(
-                        ItemCard(0, Guid.NewGuid().ToString(), "Some item", 99, iconComponent, false)
-                    );
-                    components.AddRange(
-                        ItemCard(1, Guid.NewGuid().ToString(), "Some item", 99, iconComponent, true)
-                    );
-                    components.AddRange(
-                        ItemCard(8, Guid.NewGuid().ToString(), "Some item", 99, iconComponent, true)
-                    );
-                    components.AddRange(
-                        ItemCard(7, Guid.NewGuid().ToString(), "Some item", 99, iconComponent, true)
-                    );
-                    components.AddRange(
-                        ItemCard(
-                            15,
-                            Guid.NewGuid().ToString(),
-                            "Some item",
-                            99,
-                            iconComponent,
-                            true
-                        )
-                    );
-
-                    components.AddRange(
-                        Notification("Your mom", "Is very fat, Im surprised she hasn't eat you yet")
-                    );
-
                     return CuiHelper.ToJson(components);
                 }
 
-                public static IEnumerable<CuiElement> PaginationButtons(bool bNext, bool bPrev)
+                public static IEnumerable<CuiElement> PaginationButtons(bool bPrev, bool bNext)
                 {
+                    const string COLOR_ENABLED = "0.5 0.5 0.5 0.7";
+                    const string COLOR_ICON_ENABLED = "0.8 0.8 0.8 0.6";
+
+                    const string COLOR_DISABLED = "0.5 0.5 0.5 0.5";
+                    const string COLOR_ICON_DISABLED = "0.6 0.6 0.6 0.5";
+
                     return new[]
                     {
                         new CuiElement
@@ -369,7 +787,10 @@ namespace Oxide.Plugins
                             Name = Names.PAGINATION_BTN_PREV,
                             Components =
                             {
-                                new CuiButtonComponent { Color = "0.5 0.5 0.5 0.7" },
+                                new CuiButtonComponent
+                                {
+                                    Color = bPrev ? COLOR_ENABLED : COLOR_DISABLED
+                                },
                                 new CuiRectTransformComponent
                                 {
                                     AnchorMin = "0 0",
@@ -385,8 +806,8 @@ namespace Oxide.Plugins
                             {
                                 new CuiRawImageComponent
                                 {
-                                    Url = "https://i.imgur.com/TiYyODy.png",
-                                    Color = "0.8 0.8 0.8 0.6"
+                                    Url = Icons.ARROW_LEFT,
+                                    Color = bPrev ? COLOR_ICON_ENABLED : COLOR_ICON_DISABLED
                                 },
                                 new CuiRectTransformComponent
                                 {
@@ -401,7 +822,10 @@ namespace Oxide.Plugins
                             Name = Names.PAGINATION_BTN_NEXT,
                             Components =
                             {
-                                new CuiButtonComponent { Color = "0.5 0.5 0.5 0.7" },
+                                new CuiButtonComponent
+                                {
+                                    Color = bNext ? COLOR_ENABLED : COLOR_DISABLED
+                                },
                                 new CuiRectTransformComponent
                                 {
                                     AnchorMin = "0.525 0",
@@ -417,8 +841,8 @@ namespace Oxide.Plugins
                             {
                                 new CuiRawImageComponent
                                 {
-                                    Url = "https://i.imgur.com/tBYlfGM.png",
-                                    Color = "0.8 0.8 0.8 0.6"
+                                    Url = Icons.ARROW_RIGHT,
+                                    Color = bNext ? COLOR_ICON_ENABLED : COLOR_ICON_DISABLED
                                 },
                                 new CuiRectTransformComponent
                                 {
@@ -430,9 +854,9 @@ namespace Oxide.Plugins
                     };
                 }
 
-                public static IEnumerable<CuiElement> Notification(string title, string text)
+                public static IEnumerable<CuiElement> Notification(string title, string text, string iconUrl, string btnCommand = null)
                 {
-                    var components = new List<CuiElement>
+                    List<CuiElement> components = new List<CuiElement>
                     {
                         new CuiElement
                         {
@@ -456,7 +880,7 @@ namespace Oxide.Plugins
                             {
                                 new CuiRawImageComponent
                                 {
-                                    Url = "https://i.imgur.com/zeCzK3i.png",
+                                    Url = iconUrl, //,
                                     Color = "1 1 1 0.6"
                                 },
                                 new CuiRectTransformComponent
@@ -506,6 +930,28 @@ namespace Oxide.Plugins
                             }
                         }
                     };
+                    
+                    if (btnCommand != null)
+                    {
+                        components.Add(new CuiElement
+                        {
+                            Parent = Names.NOTIFICATION_CONTAINER,
+                            Name = Names.NOTIFICATION_BTN,
+                            Components =
+                            {
+                                new CuiButtonComponent
+                                {
+                                    Color = "0 0 0 0",
+                                    Command = btnCommand
+                                },
+                                new CuiRectTransformComponent
+                                {
+                                    AnchorMin = "0 0",
+                                    AnchorMax = "1 1"
+                                }
+                            }
+                        });
+                    }
 
                     return components;
                 }
@@ -532,14 +978,14 @@ namespace Oxide.Plugins
                     int containerIndex,
                     string id,
                     string name,
-                    int amount,
+                    int? amount,
                     ICuiComponent icon,
                     bool canRedeem
                 )
                 {
-                    var uiName = Names.ItemCard(id);
+                    Names.ItemCardName uiName = Names.ItemCard(id);
 
-                    var components = new List<CuiElement>
+                    List<CuiElement> components = new List<CuiElement>
                     {
                         new CuiElement
                         {
@@ -601,26 +1047,6 @@ namespace Oxide.Plugins
                         },
                         new CuiElement
                         {
-                            Parent = uiName.TextContainer,
-                            Name = uiName.AmountText,
-                            Components =
-                            {
-                                new CuiTextComponent
-                                {
-                                    Text = 'x' + amount.ToString(),
-                                    FontSize = 10,
-                                    Color = "0.7 0.7 0.7 0.8",
-                                    Align = TextAnchor.LowerLeft
-                                },
-                                new CuiRectTransformComponent
-                                {
-                                    AnchorMin = "0 0",
-                                    AnchorMax = "1 0.5"
-                                }
-                            }
-                        },
-                        new CuiElement
-                        {
                             Parent = uiName.Container,
                             Name = uiName.Icon,
                             Components =
@@ -635,15 +1061,44 @@ namespace Oxide.Plugins
                         }
                     };
 
+                    if (amount != null)
+                    {
+                        components.Add(
+                            new CuiElement
+                            {
+                                Parent = uiName.TextContainer,
+                                Name = uiName.AmountText,
+                                Components =
+                                {
+                                    new CuiTextComponent
+                                    {
+                                        Text = 'x' + amount.ToString(),
+                                        FontSize = 10,
+                                        Color = "0.7 0.7 0.7 0.8",
+                                        Align = TextAnchor.LowerLeft
+                                    },
+                                    new CuiRectTransformComponent
+                                    {
+                                        AnchorMin = "0 0",
+                                        AnchorMax = "1 0.5"
+                                    }
+                                }
+                            }
+                        );
+                    }
 
-                    string btnColor, btnIconUrl, btnText, btnIconColor, btnTextColor;
-                    
+                    string btnColor,
+                        btnIconUrl,
+                        btnText,
+                        btnIconColor,
+                        btnTextColor;
+
                     if (canRedeem)
                     {
                         btnColor = "0.5 0.65 0.5 0.7";
                         btnTextColor = "0.7 0.85 0.7 0.85";
                         btnIconColor = "0.7 0.85 0.7 0.85";
-                        btnIconUrl = "https://i.imgur.com/xEwbjZ0.png";
+                        btnIconUrl = Icons.REDEEM;
                         btnText = "Redeem";
                     }
                     else
@@ -654,65 +1109,65 @@ namespace Oxide.Plugins
                         btnIconUrl = "https://i.imgur.com/xEwbjZ0.png";
                         btnText = "No\nspace";
                     }
-                    
+
                     components.AddRange(
-                            new[]
+                        new[]
+                        {
+                            new CuiElement
                             {
-                                new CuiElement
+                                Parent = uiName.FooterContainer,
+                                Name = uiName.Btn,
+                                Components =
                                 {
-                                    Parent = uiName.FooterContainer,
-                                    Name = uiName.Btn,
-                                    Components =
+                                    new CuiButtonComponent { Color = btnColor },
+                                    new CuiRectTransformComponent
                                     {
-                                        new CuiButtonComponent { Color = btnColor },
-                                        new CuiRectTransformComponent
-                                        {
-                                            AnchorMin = "0.5 0",
-                                            AnchorMax = "0.99 1"
-                                        }
+                                        AnchorMin = "0.5 0",
+                                        AnchorMax = "0.99 1"
                                     }
-                                },
-                                new CuiElement
+                                }
+                            },
+                            new CuiElement
+                            {
+                                Parent = uiName.Btn,
+                                Name = uiName.BtnText,
+                                Components =
                                 {
-                                    Parent = uiName.Btn,
-                                    Name = uiName.BtnText,
-                                    Components =
+                                    new CuiTextComponent
                                     {
-                                        new CuiTextComponent
-                                        {
-                                            Text = btnText,
-                                            FontSize = 10,
-                                            Align = TextAnchor.MiddleCenter,
-                                            Color = btnTextColor,
-                                            Font = Fonts.ROBOTOCONDENSED_REGULAR
-                                        },
-                                        new CuiRectTransformComponent
-                                        {
-                                            AnchorMin = "0.25 0",
-                                            AnchorMax = "1 1"
-                                        }
+                                        Text = btnText,
+                                        FontSize = 10,
+                                        Align = TextAnchor.MiddleCenter,
+                                        Color = btnTextColor,
+                                        Font = Fonts.ROBOTOCONDENSED_REGULAR
+                                    },
+                                    new CuiRectTransformComponent
+                                    {
+                                        AnchorMin = "0.25 0",
+                                        AnchorMax = "1 1"
                                     }
-                                },
-                                new CuiElement
+                                }
+                            },
+                            new CuiElement
+                            {
+                                Parent = uiName.Btn,
+                                Name = uiName.BtnIcon,
+                                Components =
                                 {
-                                    Parent = uiName.Btn,
-                                    Name = uiName.BtnIcon,
-                                    Components =
+                                    new CuiRawImageComponent
                                     {
-                                        new CuiRawImageComponent
-                                        {
-                                            Url = btnIconUrl,
-                                            Color = btnIconColor,
-                                        },
-                                        new CuiRectTransformComponent
-                                        {
-                                            AnchorMin = "0.02 0.28",
-                                            AnchorMax = "0.3 0.74"
-                                        }
+                                        Url = btnIconUrl,
+                                        Color = btnIconColor,
+                                    },
+                                    new CuiRectTransformComponent
+                                    {
+                                        AnchorMin = "0.02 0.28",
+                                        AnchorMax = "0.3 0.74"
                                     }
                                 }
                             }
-                        );
+                        }
+                    );
 
                     return components;
                 }
@@ -751,6 +1206,81 @@ namespace Oxide.Plugins
                         AnchorMin = $"{offsetX} {offsetY}",
                         AnchorMax = $"{offsetX + cardWidth} {offsetY + cardHeight}"
                     };
+                }
+            }
+
+            private static class Utilities
+            {
+                public static CuiRectTransformComponent GridTransform(
+                    int containerIndex,
+                    int columnCount,
+                    int rowCount,
+                    float columnGap,
+                    float rowGap
+                )
+                {
+                    int columnGapCount = columnCount - 1;
+                    int rowGapCount = rowCount - 1;
+
+                    float totalColumnGap = columnGap * columnGapCount;
+                    float totalRowGap = rowGap * rowGapCount;
+
+                    float cardWidth = (1.0f - totalColumnGap) / columnCount;
+                    float cardHeight = (1.0f - totalRowGap) / rowCount;
+
+                    int columnIndex = containerIndex % columnCount;
+                    int rowIndex = containerIndex / columnCount;
+
+                    float sumColumnGap = columnGap * columnIndex;
+                    float sumRowGap = rowGap * rowIndex;
+
+                    float sumPrevCardWidth = cardWidth * columnIndex;
+                    float sumPrevCardHeight = cardHeight * (rowIndex + 1);
+
+                    float offsetX = sumColumnGap + sumPrevCardWidth;
+                    float offsetY = 1.0f - (sumRowGap + sumPrevCardHeight);
+
+                    return new CuiRectTransformComponent
+                    {
+                        AnchorMin = $"{offsetX} {offsetY}",
+                        AnchorMax = $"{offsetX + cardWidth} {offsetY + cardHeight}"
+                    };
+                }
+            }
+
+            private struct ItemCard
+            {
+                public readonly string Id;
+                public readonly int ContainerIndex;
+                public readonly string Name;
+                public readonly int? Amount;
+                public readonly RedeemButtonState ButtonState;
+                public readonly string IconURL;
+                public readonly Names.ItemCardName UIName;
+
+                public ItemCard(
+                    string id,
+                    int containerIndex,
+                    string name,
+                    int? amount,
+                    RedeemButtonState buttonState,
+                    string iconURL
+                )
+                {
+                    Id = id;
+                    ContainerIndex = containerIndex;
+                    Name = name;
+                    Amount = amount;
+                    ButtonState = buttonState;
+                    IconURL = iconURL;
+                    UIName = new Names.ItemCardName(id);
+                }
+
+                public enum RedeemButtonState
+                {
+                    CAN_REDEEM,
+                    NO_SPACE,
+                    FAILED
                 }
             }
 
@@ -831,16 +1361,108 @@ namespace Oxide.Plugins
                 public const string ROBOTOCONDENSED_REGULAR = "robotocondensed-regular.ttf";
                 public const string ROBOTOCONDENSED_BOLD = "robotocondensed.ttf";
             }
+
+            private static class Icons
+            {
+                public const string NOTIFICATION_ERROR = "";
+                public const string NOTIFICATION_RETRY = "";
+                public const string NOTIFICATION_PENDING = "";
+                public const string CLOSE_CROSS = "https://i.imgur.com/zeCzK3i.png";
+                public const string ARROW_LEFT = "https://i.imgur.com/TiYyODy.png";
+                public const string ARROW_RIGHT = "https://i.imgur.com/tBYlfGM.png";
+                public const string ITEM_DEFAULT = "https://api.gmonetize.ru/static/v2/image/plugin/icons/rust_94773.png";
+                public const string REDEEM = "https://i.imgur.com/xEwbjZ0.png";
+                public const string REDEEM_RETRY = "";
+                public const string REDEEM_WIPEBLOCKED = "";
+                public const string REDEEM_NOSPACE = "";
+                public const string USER_NOT_FOUND = "";
+            }
         }
 
-        private class APIClient
+        private static class APIClient
         {
+            private static Dictionary<string, string> Headers =>
+                new Dictionary<string, string>
+                {
+                    { "Content-Type", "application/json" },
+                    { "Authorization", $"ApiKey {Instance._settings.ApiKey}" }
+                };
+
+            private static string MainBaseUrl => Instance._settings.ApiUrl + "/main/v3/plugin";
+            private static string StaticBaseUrl => Instance._settings.ApiUrl + "/static/v2";
+
+            public static void GetPlayerInventory(
+                string userId,
+                Action<List<InventoryEntryDto>> okCb,
+                Action<int> errorCb
+            )
+            {
+                string url = MainBaseUrl + $"/customer/STEAM/{userId}/inventory";
+
+                Instance.webrequest.Enqueue(
+                    url,
+                    null,
+                    (code, body) =>
+                    {
+                        if (code == 200)
+                        {
+                            LogDebug("Received inventory:\n{0}", body);
+                            okCb(JsonConvert.DeserializeObject<List<InventoryEntryDto>>(body));
+                        }
+                        else
+                        {
+                            errorCb(code);
+                        }
+                    },
+                    Instance,
+                    RequestMethod.GET,
+                    Headers
+                );
+            }
+
+            public static void RedeemItem(
+                string userId,
+                string inventoryEntryId,
+                Action okCb,
+                Action<int> errorCb
+            )
+            {
+                string url =
+                    MainBaseUrl + $"/customer/STEAM/{userId}/inventory/{inventoryEntryId}/redeem";
+
+                Instance.webrequest.Enqueue(
+                    url,
+                    null,
+                    (code, body) =>
+                    {
+                        if (code == 204)
+                        {
+                            okCb();
+                        }
+                        else
+                        {
+                            errorCb(code);
+                        }
+                    },
+                    Instance,
+                    RequestMethod.POST,
+                    Headers
+                );
+            }
+
+            public static string GetIconUrl(string iconId)
+            {
+                return StaticBaseUrl + $"/image/{iconId}";
+            }
+
             public class InventoryEntryDto
             {
                 public string id;
                 public InventoryEntryType type;
                 public string name;
                 public string iconId;
+
+                [JsonConverter(typeof(DurationTimeSpanJsonConverter))]
                 public TimeSpan? wipeBlockDuration;
 
                 public ItemDto item;
@@ -888,26 +1510,130 @@ namespace Oxide.Plugins
                 public string id;
                 public string name;
                 public string groupName;
+
+                [JsonConverter(typeof(DurationTimeSpanJsonConverter))]
                 public TimeSpan? duration;
                 public string iconId;
+            }
+
+            private class DurationTimeSpanJsonConverter : JsonConverter
+            {
+                public override void WriteJson(
+                    JsonWriter writer,
+                    object value,
+                    JsonSerializer serializer
+                )
+                {
+                    throw new NotImplementedException();
+                }
+
+                public override object ReadJson(
+                    JsonReader reader,
+                    Type objectType,
+                    object existingValue,
+                    JsonSerializer serializer
+                )
+                {
+                    string stringValue = reader.Value as string;
+
+                    if (string.IsNullOrEmpty(stringValue))
+                    {
+                        LogDebug("TimeSpan stringValue is null");
+                        return null;
+                    }
+
+                    TimeSpan ts = ParseDuration(stringValue);
+
+                    LogDebug("Converting to timeSpan: {0}=>{1}", stringValue, ts);
+
+                    return ts;
+                }
+
+                public override bool CanConvert(Type objectType)
+                {
+                    return objectType == typeof(TimeSpan?);
+                }
+
+                public static TimeSpan ParseDuration(string input)
+                {
+                    int tIndex = input.IndexOf('T');
+
+                    int timePortionIndex = tIndex != -1 ? tIndex + 1 : 0;
+
+                    int partStart = timePortionIndex;
+                    int hours = 0,
+                        minutes = 0,
+                        seconds = 0;
+                    for (int i = timePortionIndex; i < input.Length; i++)
+                    {
+                        char c = input[i];
+
+                        string partBuf;
+
+                        switch (c)
+                        {
+                            case 'H':
+                                partBuf = input.Substring(partStart, i - partStart);
+                                hours = int.Parse(partBuf);
+                                partStart = i + 1;
+                                break;
+                            case 'M':
+                                partBuf = input.Substring(partStart, i - partStart);
+                                minutes = int.Parse(partBuf);
+                                partStart = i + 1;
+                                break;
+                            case 'S':
+                            case 'Z':
+                                partBuf = input.Substring(partStart, i - partStart);
+                                seconds = int.Parse(partBuf);
+                                partStart = i + 1;
+                                if (c == 'Z')
+                                {
+                                    i = input.Length;
+                                }
+
+                                break;
+
+                            default:
+                                if (i == input.Length - 1)
+                                {
+                                    partBuf = input.Substring(partStart, i - partStart + 1);
+                                    seconds = int.Parse(partBuf);
+                                }
+
+                                break;
+                        }
+                    }
+
+                    return new TimeSpan(0, hours, minutes, seconds);
+                }
             }
         }
 
         private class PluginSettings
         {
-            public string APIKey { get; set; }
+            public string ApiKey { get; set; }
+            public string ApiUrl { get; set; }
             public string[] ChatCommands { get; set; }
             public PermissionGiveMethod PermissionGiveKind { get; set; }
 
             public static PluginSettings GetDefaults()
             {
-                return new PluginSettings { };
+                return new PluginSettings
+                {
+                    ApiKey = "change me",
+                    ApiUrl = "https://api.gmonetize.ru",
+                    ChatCommands = new[] { "shop" },
+                    PermissionGiveKind = PermissionGiveMethod.Auto
+                };
             }
 
             public enum PermissionGiveMethod
             {
+                Auto,
                 Internal,
-                TimedPermissions
+                TimedPermissions,
+                IQPermissions
             }
         }
     }
