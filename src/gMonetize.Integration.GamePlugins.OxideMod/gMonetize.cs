@@ -7,6 +7,7 @@ using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Linq;
 using JetBrains.Annotations;
+using Mono.Security.X509;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Converters;
 using Oxide.Core;
@@ -33,11 +34,17 @@ namespace Oxide.Plugins
 
         private PluginSettings _settings;
 
+        #region Debug logging
+
         [Conditional("DEBUG")]
         private static void LogDebug(string format, params object[] args)
         {
             Interface.uMod.LogDebug("[gMonetize] " + format, args);
         }
+
+        #endregion
+
+        #region Configuration handling
 
         protected override void LoadDefaultConfig()
         {
@@ -64,6 +71,10 @@ namespace Oxide.Plugins
             Config.WriteObject(_settings);
         }
 
+        #endregion
+
+        #region Oxide hooks
+
         private void Init()
         {
             Instance = this;
@@ -72,6 +83,17 @@ namespace Oxide.Plugins
         private void OnServerInitialized()
         {
             RegisterCommands();
+
+            if (
+                string.IsNullOrWhiteSpace(_settings.ApiKey)
+                || _settings.ApiKey == PluginSettings.GetDefaults().ApiKey
+            )
+            {
+                LogWarning(
+                    "API key was not set up properly. You have to specify it to allow plugin to communicate with gMonetize API"
+                );
+            }
+
             foreach (IPlayer player in players.Connected)
             {
                 OnUserConnected(player);
@@ -102,6 +124,8 @@ namespace Oxide.Plugins
             }
         }
 
+        #endregion
+
         private void RegisterCommands()
         {
             covalence.RegisterCommand(CMD_OPEN, this, HandleCommand);
@@ -110,7 +134,16 @@ namespace Oxide.Plugins
             covalence.RegisterCommand(CMD_PREV_PAGE, this, HandleCommand);
             covalence.RegisterCommand(CMD_RETRY_LOAD, this, HandleCommand);
             covalence.RegisterCommand(CMD_REDEEM_ITEM, this, HandleCommand);
-            covalence.RegisterCommand("shop", this, HandleCommand);
+
+            foreach (var command in _settings.ChatCommands)
+            {
+                covalence.RegisterCommand(command, this, HandleCommand);
+            }
+
+            if (_settings.ChatCommands.Length == 0)
+            {
+                LogWarning("No chat commands were registered");
+            }
         }
 
         private bool HandleCommand(IPlayer player, string command, string[] args)
@@ -155,7 +188,17 @@ namespace Oxide.Plugins
                     break;
 
                 case CMD_REDEEM_ITEM:
-
+                    APIClient.RedeemItem(
+                        player.Id,
+                        args[0],
+                        () => basePlayer.SendMessage(nameof(UI.gMonetize_RedeemItemOk), args[0]),
+                        code =>
+                            basePlayer.SendMessage(
+                                nameof(UI.gMonetize_ItemClaimedError),
+                                new object[] { args[0], code }
+                            )
+                    );
+                    basePlayer.SendMessage(nameof(UI.gMonetize_RedeemItemPending), args[0]);
                     break;
 
                 default:
@@ -237,8 +280,22 @@ namespace Oxide.Plugins
             private NotificationState _notificationState;
 
             private List<APIClient.InventoryEntryDto> _inventory;
+            private Dictionary<string, APIClient.InventoryEntryDto> _inventoryIdMap;
 
             private int _currentPageId;
+
+            private void SetInventory(IEnumerable<APIClient.InventoryEntryDto> inventory = null)
+            {
+                if (inventory == null)
+                {
+                    _inventory = null;
+                    _inventoryIdMap = null;
+                    return;
+                }
+
+                _inventory = inventory.ToList();
+                _inventoryIdMap = _inventory.ToDictionary(entry => entry.id, entry => entry);
+            }
 
             private int PageCount()
             {
@@ -305,9 +362,13 @@ namespace Oxide.Plugins
                 CloseAndReleaseInventory();
             }
 
-            public void gMonetize_ItemClaimedOk(APIClient.InventoryEntryDto inventoryEntry) { }
+            public void gMonetize_RedeemItemOk(string inventoryEntryId) { }
 
-            public void gMonetize_ItemClaimedError(APIClient.InventoryEntryDto inventoryEntry) { }
+            public void gMonetize_ItemClaimedError(object[] args)
+            {
+                string inventoryEntryId = (string)args[0];
+                int errorCode = (int)args[1];
+            }
 
             public void gMonetize_InventoryReceived(
                 List<APIClient.InventoryEntryDto> inventoryEntries
@@ -375,6 +436,22 @@ namespace Oxide.Plugins
                 _currentPageId--;
                 DrawInventoryPage();
                 DrawPaginationButtons();
+            }
+
+            public void gMonetize_RedeemItemPending(string id)
+            {
+                if (!_isOpen)
+                    return;
+
+                APIClient.InventoryEntryDto entry;
+                if (!_inventoryIdMap.TryGetValue(id, out entry))
+                {
+                    LogDebug(
+                        "Called gMonetize_RedeemItemPending({0}), but item was not found in inventory",
+                        id
+                    );
+                    return;
+                }
             }
 
             private void CloseAndReleaseInventory()
@@ -574,7 +651,11 @@ namespace Oxide.Plugins
                         CuiHelper.AddUi(
                             _player,
                             Builder
-                                .Notification("Unknown error", "Houston, we got problems...")
+                                .Notification(
+                                    "Unknown error",
+                                    "Houston, we got problems...",
+                                    Icons.CLOSE_CROSS
+                                )
                                 .ToList()
                         );
                         break;
@@ -583,7 +664,11 @@ namespace Oxide.Plugins
                         CuiHelper.AddUi(
                             _player,
                             Builder
-                                .Notification("No items", "Looks like your inventory is empty...")
+                                .Notification(
+                                    "No items",
+                                    "Looks like your inventory is empty...",
+                                    Icons.NOTIFICATION_INVENTORY_EMPTY
+                                )
                                 .ToList()
                         );
                         break;
@@ -619,6 +704,12 @@ namespace Oxide.Plugins
 
             private static class Builder
             {
+                public const int COLUMNS = 8;
+                public const int ROWS = 4;
+                public const int CARD_COUNT = COLUMNS * ROWS;
+                public const float COLUMN_GAP = .005f;
+                public const float ROW_GAP = .01f;
+
                 public static string Base()
                 {
                     List<CuiElement> components = new List<CuiElement>
@@ -854,7 +945,12 @@ namespace Oxide.Plugins
                     };
                 }
 
-                public static IEnumerable<CuiElement> Notification(string title, string text, string iconUrl, string btnCommand = null)
+                public static IEnumerable<CuiElement> Notification(
+                    string title,
+                    string text,
+                    string iconUrl,
+                    string btnCommand = null
+                )
                 {
                     List<CuiElement> components = new List<CuiElement>
                     {
@@ -930,27 +1026,29 @@ namespace Oxide.Plugins
                             }
                         }
                     };
-                    
+
                     if (btnCommand != null)
                     {
-                        components.Add(new CuiElement
-                        {
-                            Parent = Names.NOTIFICATION_CONTAINER,
-                            Name = Names.NOTIFICATION_BTN,
-                            Components =
+                        components.Add(
+                            new CuiElement
                             {
-                                new CuiButtonComponent
+                                Parent = Names.NOTIFICATION_CONTAINER,
+                                Name = Names.NOTIFICATION_BTN,
+                                Components =
                                 {
-                                    Color = "0 0 0 0",
-                                    Command = btnCommand
-                                },
-                                new CuiRectTransformComponent
-                                {
-                                    AnchorMin = "0 0",
-                                    AnchorMax = "1 1"
+                                    new CuiButtonComponent
+                                    {
+                                        Color = "0 0 0 0",
+                                        Command = btnCommand
+                                    },
+                                    new CuiRectTransformComponent
+                                    {
+                                        AnchorMin = "0 0",
+                                        AnchorMax = "1 1"
+                                    }
                                 }
                             }
-                        });
+                        );
                     }
 
                     return components;
@@ -994,7 +1092,13 @@ namespace Oxide.Plugins
                             Components =
                             {
                                 new CuiImageComponent { Color = "0.5 0.5 0.5 0.7" },
-                                GridTransform(containerIndex, 8, 4, .005f, .01f)
+                                Utilities.GridTransform(
+                                    containerIndex,
+                                    COLUMNS,
+                                    ROWS,
+                                    COLUMN_GAP,
+                                    ROW_GAP
+                                )
                             }
                         },
                         new CuiElement
@@ -1171,42 +1275,6 @@ namespace Oxide.Plugins
 
                     return components;
                 }
-
-                private static CuiRectTransformComponent GridTransform(
-                    int containerIndex,
-                    int columnCount,
-                    int rowCount,
-                    float columnGap,
-                    float rowGap
-                )
-                {
-                    int columnGapCount = columnCount - 1;
-                    int rowGapCount = rowCount - 1;
-
-                    float totalColumnGap = columnGap * columnGapCount;
-                    float totalRowGap = rowGap * rowGapCount;
-
-                    float cardWidth = (1.0f - totalColumnGap) / columnCount;
-                    float cardHeight = (1.0f - totalRowGap) / rowCount;
-
-                    int columnIndex = containerIndex % columnCount;
-                    int rowIndex = containerIndex / columnCount;
-
-                    float sumColumnGap = columnGap * columnIndex;
-                    float sumRowGap = rowGap * rowIndex;
-
-                    float sumPrevCardWidth = cardWidth * columnIndex;
-                    float sumPrevCardHeight = cardHeight * (rowIndex + 1);
-
-                    float offsetX = sumColumnGap + sumPrevCardWidth;
-                    float offsetY = 1.0f - (sumRowGap + sumPrevCardHeight);
-
-                    return new CuiRectTransformComponent
-                    {
-                        AnchorMin = $"{offsetX} {offsetY}",
-                        AnchorMax = $"{offsetX + cardWidth} {offsetY + cardHeight}"
-                    };
-                }
             }
 
             private static class Utilities
@@ -1257,6 +1325,7 @@ namespace Oxide.Plugins
                 public readonly RedeemButtonState ButtonState;
                 public readonly string IconURL;
                 public readonly Names.ItemCardName UIName;
+                public readonly TimeSpan WipeBlockTimeLeft;
 
                 public ItemCard(
                     string id,
@@ -1264,7 +1333,8 @@ namespace Oxide.Plugins
                     string name,
                     int? amount,
                     RedeemButtonState buttonState,
-                    string iconURL
+                    string iconURL,
+                    TimeSpan wipeBlockTimeLeft
                 )
                 {
                     Id = id;
@@ -1274,6 +1344,62 @@ namespace Oxide.Plugins
                     ButtonState = buttonState;
                     IconURL = iconURL;
                     UIName = new Names.ItemCardName(id);
+                    WipeBlockTimeLeft = wipeBlockTimeLeft;
+                }
+
+                public static ItemCard FromInventoryEntry(
+                    int containerIndex,
+                    APIClient.InventoryEntryDto inventoryEntry
+                ) { }
+
+                public void ToUpdateComponents(ItemCard oldState, List<CuiElement> components)
+                {
+                    if (ContainerIndex != oldState.ContainerIndex)
+                    {
+                        components.Add(
+                            new CuiElement
+                            {
+                                Name = UIName.Container,
+                                Components =
+                                {
+                                    Utilities.GridTransform(
+                                        ContainerIndex,
+                                        Builder.COLUMNS,
+                                        Builder.ROWS,
+                                        Builder.COLUMN_GAP,
+                                        Builder.ROW_GAP
+                                    )
+                                }
+                            }
+                        );
+                    }
+
+                    if (ButtonState != oldState.ButtonState)
+                    {
+                        AddButton(components);
+                    }
+                }
+
+                private void AddButton(List<CuiElement> components)
+                {
+                    throw new NotImplementedException();
+                    
+                    switch (ButtonState)
+                    {
+                        case RedeemButtonState.CAN_REDEEM:
+                            break;
+                        case RedeemButtonState.NO_SPACE:
+                            break;
+                        case RedeemButtonState.FAILED:
+                            break;
+                        default:
+                            throw new ArgumentOutOfRangeException();
+                    }
+                }
+
+                public void ToComponents(List<CuiElement> components)
+                {
+                    components.Clear();
                 }
 
                 public enum RedeemButtonState
@@ -1370,12 +1496,14 @@ namespace Oxide.Plugins
                 public const string CLOSE_CROSS = "https://i.imgur.com/zeCzK3i.png";
                 public const string ARROW_LEFT = "https://i.imgur.com/TiYyODy.png";
                 public const string ARROW_RIGHT = "https://i.imgur.com/tBYlfGM.png";
-                public const string ITEM_DEFAULT = "https://api.gmonetize.ru/static/v2/image/plugin/icons/rust_94773.png";
+                public const string ITEM_DEFAULT =
+                    "https://api.gmonetize.ru/static/v2/image/plugin/icons/rust_94773.png";
                 public const string REDEEM = "https://i.imgur.com/xEwbjZ0.png";
                 public const string REDEEM_RETRY = "";
                 public const string REDEEM_WIPEBLOCKED = "";
                 public const string REDEEM_NOSPACE = "";
                 public const string USER_NOT_FOUND = "";
+                public const string NOTIFICATION_INVENTORY_EMPTY = "";
             }
         }
 
