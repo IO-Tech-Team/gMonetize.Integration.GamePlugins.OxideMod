@@ -513,8 +513,6 @@ namespace Oxide.Plugins
                 default:
                     throw new ArgumentOutOfRangeException();
             }
-            
-            
         }
 
         private bool TryGiveItemInventoryEntry(
@@ -552,27 +550,42 @@ namespace Oxide.Plugins
         {
             if (!inventoryEntry.permission.duration.HasValue)
             {
-                _permissionsIntegrationModule.AddPermission(player.IPlayer, inventoryEntry.permission.value);
+                _permissionsIntegrationModule.AddPermission(
+                    player.IPlayer,
+                    inventoryEntry.permission.value
+                );
             }
             else
             {
-                _permissionsIntegrationModule.AddPermission(player.IPlayer, inventoryEntry.permission.value,
-                    inventoryEntry.permission.duration.Value);
-
+                _permissionsIntegrationModule.AddPermission(
+                    player.IPlayer,
+                    inventoryEntry.permission.value,
+                    inventoryEntry.permission.duration.Value
+                );
             }
 
             return true;
         }
 
-        private bool TryGiveGroupInventoryEntry(BasePlayer player, APIClient.InventoryEntryDto inventoryEntry)
+        private bool TryGiveGroupInventoryEntry(
+            BasePlayer player,
+            APIClient.InventoryEntryDto inventoryEntry
+        )
         {
             if (!inventoryEntry.rank.duration.HasValue)
             {
-                _permissionsIntegrationModule.AddGroup(player.IPlayer, inventoryEntry.rank.groupName);
+                _permissionsIntegrationModule.AddGroup(
+                    player.IPlayer,
+                    inventoryEntry.rank.groupName
+                );
             }
             else
             {
-                _permissionsIntegrationModule.AddGroup(player.IPlayer, inventoryEntry.rank.groupName, inventoryEntry.rank.duration);
+                _permissionsIntegrationModule.AddGroup(
+                    player.IPlayer,
+                    inventoryEntry.rank.groupName,
+                    inventoryEntry.rank.duration.Value
+                );
             }
 
             return true;
@@ -663,6 +676,22 @@ namespace Oxide.Plugins
 
             private int _currentPageId;
 
+            private void Awake()
+            {
+                _player = GetComponent<BasePlayer>();
+                if (_player == null)
+                {
+                    throw new Exception(
+                        "Component added to an Object without BasePlayer behaviour"
+                    );
+                }
+            }
+            
+            private void OnDestroy()
+            {
+                CloseAndReleaseInventory();
+            }
+            
             private int PageCount()
             {
                 if (_inventory == null)
@@ -685,29 +714,13 @@ namespace Oxide.Plugins
             {
                 return _currentPageId > 0;
             }
-
-            private void Awake()
-            {
-                _player = GetComponent<BasePlayer>();
-                if (_player == null)
-                {
-                    throw new Exception(
-                        "Component added to an Object without BasePlayer behaviour"
-                    );
-                }
-            }
-
+            
             private List<APIClient.InventoryEntryDto> CurrentPageItems()
             {
                 return _inventory
                     .Skip(ITEMS_PER_PAGE * _currentPageId)
                     .Take(ITEMS_PER_PAGE)
                     .ToList();
-            }
-
-            private void OnDestroy()
-            {
-                CloseAndReleaseInventory();
             }
 
             public void gMonetize_OpenUI()
@@ -729,6 +742,12 @@ namespace Oxide.Plugins
             }
 
             public void gMonetize_RedeemItemOk(string inventoryEntryId) { }
+
+            public void gMonetize_RedeemItemGiveError(string id)
+            {
+                var elements = Builder.ItemCardButtonUpdate(id, InventoryEntryRedeemState.FAILED);
+                CuiHelper.AddUi(_player, elements.ToList());
+            }
 
             public void gMonetize_RedeemItemRequestError(object[] args)
             {
