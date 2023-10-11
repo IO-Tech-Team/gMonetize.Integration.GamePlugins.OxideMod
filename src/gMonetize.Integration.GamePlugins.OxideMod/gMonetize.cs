@@ -3,7 +3,10 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using System.Linq;
+using System.Text;
+using Melanchall.DryWetMidi.Interaction;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Converters;
 using Oxide.Core;
@@ -11,11 +14,16 @@ using Oxide.Core.Libraries;
 using Oxide.Core.Libraries.Covalence;
 using Oxide.Game.Rust.Cui;
 using UnityEngine;
+// ReSharper disable StringLiteralTypo
+// ReSharper disable IdentifierTypo
+#pragma warning disable CS0649 // Field is never assigned to, and will always have its default value
 
 namespace Oxide.Plugins
 {
     [Info("gMonetize", "gMonetize Project", "2.0.0")]
     [Description("gMonetize integration with OxideMod")]
+    [SuppressMessage("ReSharper", "UnusedMember.Local")]
+    [SuppressMessage("ReSharper", "MemberCanBePrivate.Local")]
     // ReSharper disable once InconsistentNaming
     // ReSharper disable once ClassNeverInstantiated.Global
     public class gMonetize : CovalencePlugin
@@ -31,6 +39,7 @@ namespace Oxide.Plugins
         private static gMonetize Instance;
 
         private PluginSettings _settings;
+        private IPermissionsIntegrationModule _permissionsIntegrationModule;
 
         #region Debug logging
 
@@ -275,12 +284,17 @@ namespace Oxide.Plugins
 
         private bool HandleCommand(IPlayer player, string command, string[] args)
         {
+            LogDebug(
+                "Player {0} has executed command: {1}, [{2}]",
+                player,
+                command,
+                string.Join(", ", args)
+            );
+
             if (command != CMD_CLOSE && !player.HasPermission(PERMISSION_USE))
             {
-                string prefix = Translate("chat.prefix", player);
-                string msg = Translate("chat.error.no_permission", player);
-
-                player.Message(prefix + msg);
+                SendChatMessage(player, "chat.error.no_permission");
+                return true;
             }
 
             BasePlayer basePlayer;
@@ -292,10 +306,9 @@ namespace Oxide.Plugins
                     command,
                     player
                 );
+                SendChatMessage(player, "chat.error.baseplayer_not_found");
                 return true;
             }
-
-            LogDebug("Command {0} by player {1}", command, player);
 
             switch (command)
             {
@@ -326,10 +339,22 @@ namespace Oxide.Plugins
                     APIClient.RedeemItem(
                         player.Id,
                         args[0],
-                        () => basePlayer.SendMessage(nameof(UI.gMonetize_RedeemItemOk), args[0]),
+                        () =>
+                        {
+                            var component = basePlayer.GetComponent<UI>();
+                            var inventoryEntry = component.GetCachedInventoryEntry(args[0]);
+                            if (!TryGiveInventoryEntry(basePlayer, inventoryEntry))
+                            {
+                                component.gMonetize_RedeemItemGiveError(args[0]);
+                            }
+                            else
+                            {
+                                component.gMonetize_RedeemItemOk(args[0]);
+                            }
+                        },
                         code =>
                             basePlayer.SendMessage(
-                                nameof(UI.gMonetize_ItemClaimedError),
+                                nameof(UI.gMonetize_RedeemItemRequestError),
                                 new object[] { args[0], code }
                             )
                     );
@@ -362,6 +387,54 @@ namespace Oxide.Plugins
         }
 
         #endregion
+
+        private void LoadPermissionsIntegrationModule()
+        {
+            switch (_settings.PermissionGiveKind)
+            {
+                case PluginSettings.PermissionGiveMethod.Auto:
+                    _permissionsIntegrationModule = AutoChoosePermissionsIntegrationModule();
+                    break;
+                case PluginSettings.PermissionGiveMethod.Internal:
+                    _permissionsIntegrationModule = new NativePermissionsIntegration(this);
+                    break;
+                case PluginSettings.PermissionGiveMethod.TimedPermissions:
+                    _permissionsIntegrationModule = new TimedPermissionsIntegration(this);
+                    break;
+                case PluginSettings.PermissionGiveMethod.IQPermissions:
+                    _permissionsIntegrationModule = new IQPermissionsIntegration(this);
+                    break;
+            }
+
+            LogDebug(
+                "Permissions integration module: {0}",
+                _permissionsIntegrationModule.GetType().Name
+            );
+        }
+
+        private IPermissionsIntegrationModule AutoChoosePermissionsIntegrationModule()
+        {
+            if (plugins.Find("TimedPermissions") != null)
+            {
+                LogDebug(
+                    "Choosing TimedPermissions integration module as IPermissionsIntegrationModule, based on loaded TimedPermissions plugin"
+                );
+                return new TimedPermissionsIntegration(this);
+            }
+
+            if (plugins.Find("IQPermissions") != null)
+            {
+                LogDebug(
+                    "Choosing IQPermissions integration module as IPermissionsIntegrationModule, based on loaded IQPermissions plugin"
+                );
+                return new IQPermissionsIntegration(this);
+            }
+
+            LogDebug(
+                "Choosing native permissions integration module as IPermissionsIntegrationModule, because permission plugins were not found"
+            );
+            return new NativePermissionsIntegration(this);
+        }
 
         private bool TryGetBasePlayer(IPlayer player, out BasePlayer basePlayer)
         {
@@ -406,6 +479,176 @@ namespace Oxide.Plugins
                 - containerBeltItems;
         }
 
+        private bool TryGiveInventoryEntry(
+            BasePlayer player,
+            APIClient.InventoryEntryDto inventoryEntry
+        )
+        {
+            if (IsWipeBlocked(inventoryEntry))
+            {
+                return false;
+            }
+
+            if (!HasAvailableSpace(player, inventoryEntry))
+            {
+                return false;
+            }
+
+            switch (inventoryEntry.type)
+            {
+                case APIClient.InventoryEntryDto.InventoryEntryType.ITEM:
+                    return TryGiveItemInventoryEntry(player, inventoryEntry);
+                case APIClient.InventoryEntryDto.InventoryEntryType.KIT:
+                    break;
+                case APIClient.InventoryEntryDto.InventoryEntryType.RANK:
+                    return TryGiveGroupInventoryEntry(player, inventoryEntry);
+                    break;
+                case APIClient.InventoryEntryDto.InventoryEntryType.RESEARCH:
+                    break;
+                case APIClient.InventoryEntryDto.InventoryEntryType.CUSTOM:
+                    break;
+                case APIClient.InventoryEntryDto.InventoryEntryType.PERMISSION:
+                    return TryGivePermissionInventoryEntry(player, inventoryEntry);
+                    break;
+                default:
+                    throw new ArgumentOutOfRangeException();
+            }
+            
+            
+        }
+
+        private bool TryGiveItemInventoryEntry(
+            BasePlayer player,
+            APIClient.InventoryEntryDto inventoryEntry
+        )
+        {
+            var itemDefinition = ItemManager.FindItemDefinition(inventoryEntry.item.itemId);
+
+            if (!itemDefinition)
+            {
+                return false;
+            }
+
+            if (GetPlayerAvailableSlots(player) < 1)
+            {
+                return false;
+            }
+
+            var item = ItemManager.Create(
+                itemDefinition,
+                inventoryEntry.item.amount,
+                inventoryEntry.item.meta.skinId ?? 0ul
+            );
+
+            player.GiveItem(item, BaseEntity.GiveItemReason.PickedUp);
+
+            return true;
+        }
+
+        private bool TryGivePermissionInventoryEntry(
+            BasePlayer player,
+            APIClient.InventoryEntryDto inventoryEntry
+        )
+        {
+            if (!inventoryEntry.permission.duration.HasValue)
+            {
+                _permissionsIntegrationModule.AddPermission(player.IPlayer, inventoryEntry.permission.value);
+            }
+            else
+            {
+                _permissionsIntegrationModule.AddPermission(player.IPlayer, inventoryEntry.permission.value,
+                    inventoryEntry.permission.duration.Value);
+
+            }
+
+            return true;
+        }
+
+        private bool TryGiveGroupInventoryEntry(BasePlayer player, APIClient.InventoryEntryDto inventoryEntry)
+        {
+            if (!inventoryEntry.rank.duration.HasValue)
+            {
+                _permissionsIntegrationModule.AddGroup(player.IPlayer, inventoryEntry.rank.groupName);
+            }
+            else
+            {
+                _permissionsIntegrationModule.AddGroup(player.IPlayer, inventoryEntry.rank.groupName, inventoryEntry.rank.duration);
+            }
+
+            return true;
+        }
+
+        private bool HasAvailableSpace(
+            BasePlayer player,
+            APIClient.InventoryEntryDto inventoryEntry
+        )
+        {
+            var slots = GetPlayerAvailableSlots(player);
+
+            if (inventoryEntry.type == APIClient.InventoryEntryDto.InventoryEntryType.ITEM)
+            {
+                return slots != 0;
+            }
+
+            if (
+                inventoryEntry.type == APIClient.InventoryEntryDto.InventoryEntryType.KIT
+                || inventoryEntry.type == APIClient.InventoryEntryDto.InventoryEntryType.CUSTOM
+            )
+            {
+                return slots
+                    >= inventoryEntry.contents.Count(
+                        c => c.type == APIClient.GoodObjectDto.GoodObjectType.ITEM
+                    );
+            }
+
+            return true;
+        }
+
+        private bool IsWipeBlocked(APIClient.InventoryEntryDto inventoryEntry)
+        {
+            if (inventoryEntry.wipeBlockDuration == null)
+                return false;
+
+            var timeSinceWipe = DateTime.Now - SaveRestore.SaveCreatedTime;
+
+            return inventoryEntry.wipeBlockDuration < timeSinceWipe;
+        }
+
+        private bool IsUnlocked(
+            BasePlayer player,
+            APIClient.ResearchDto research,
+            out ItemDefinition itemDefinition
+        )
+        {
+            return IsUnlocked(player, research.researchId, out itemDefinition);
+        }
+
+        private bool IsUnlocked(
+            BasePlayer player,
+            APIClient.GoodObjectDto goodObject,
+            out ItemDefinition itemDefinition
+        )
+        {
+            return IsUnlocked(player, goodObject.researchId, out itemDefinition);
+        }
+
+        private bool IsUnlocked(
+            BasePlayer player,
+            int blueprintId,
+            out ItemDefinition itemDefinition
+        )
+        {
+            itemDefinition = ItemManager.FindItemDefinition(blueprintId);
+
+            if (itemDefinition == null)
+            {
+                LogError("Failed to find ItemDefinition for blueprint ID {0}", blueprintId);
+                return false;
+            }
+
+            return player.blueprints.IsUnlocked(itemDefinition);
+        }
+
         private class UI : FacepunchBehaviour
         {
             private const int ITEMS_PER_PAGE = Builder.CARD_COUNT;
@@ -417,22 +660,8 @@ namespace Oxide.Plugins
             private NotificationState _notificationState;
 
             private List<APIClient.InventoryEntryDto> _inventory;
-            private Dictionary<string, APIClient.InventoryEntryDto> _inventoryIdMap;
 
             private int _currentPageId;
-
-            private void SetInventory(IEnumerable<APIClient.InventoryEntryDto> inventory = null)
-            {
-                if (inventory == null)
-                {
-                    _inventory = null;
-                    _inventoryIdMap = null;
-                    return;
-                }
-
-                _inventory = inventory.ToList();
-                _inventoryIdMap = _inventory.ToDictionary(entry => entry.id, entry => entry);
-            }
 
             private int PageCount()
             {
@@ -501,10 +730,10 @@ namespace Oxide.Plugins
 
             public void gMonetize_RedeemItemOk(string inventoryEntryId) { }
 
-            public void gMonetize_ItemClaimedError(object[] args)
+            public void gMonetize_RedeemItemRequestError(object[] args)
             {
-                string inventoryEntryId = (string)args[0];
-                int errorCode = (int)args[1];
+                /*string inventoryEntryId = (string)args[0];
+                int errorCode = (int)args[1];*/
             }
 
             public void gMonetize_InventoryReceived(
@@ -587,6 +816,28 @@ namespace Oxide.Plugins
                 );
 
                 CuiHelper.AddUi(_player, (List<CuiElement>)elements);
+            }
+
+            public APIClient.InventoryEntryDto GetCachedInventoryEntry(string id)
+            {
+                if (_inventory == null)
+                {
+                    throw new InvalidOperationException("Inventory is null");
+                }
+
+                APIClient.InventoryEntryDto entry = _inventory.Find(e => e.id == id);
+
+                if (entry == null)
+                {
+                    throw new Exception(
+                        "Entry with id "
+                            + id
+                            + " was not found in inventory of player "
+                            + _player.IPlayer
+                    );
+                }
+
+                return entry;
             }
 
             private void CloseAndReleaseInventory()
@@ -1597,8 +1848,6 @@ namespace Oxide.Plugins
                 }
             }
 
-            private static class Colors { }
-
             private static class Utilities
             {
                 public static CuiRectTransformComponent GridTransform(
@@ -1739,6 +1988,10 @@ namespace Oxide.Plugins
             }
         }
 
+        [SuppressMessage("ReSharper", "InconsistentNaming")]
+        [SuppressMessage("ReSharper", "NotAccessedField.Local")]
+        [SuppressMessage("ReSharper", "ClassNeverInstantiated.Local")]
+        [SuppressMessage("ReSharper", "UnusedParameter.Local")]
         private static class APIClient
         {
             private static readonly Dictionary<string, string> s_RequestHeaders =
@@ -1746,13 +1999,10 @@ namespace Oxide.Plugins
 
             private static string s_InventoryUrl;
             private static string s_RedeemUrl;
+            private static string s_IconUrl;
             private static string s_BalanceUrl;
             private static string s_NewPromocodeUrl;
             private static string s_NewInventoryItemUrl;
-            private static string s_IconUrl;
-
-            private static string MainBaseUrl => Instance._settings.ApiUrl + "/main/v3/plugin";
-            private static string StaticBaseUrl => Instance._settings.ApiUrl + "/static/v2";
 
             public static void Init(string apiUrl, string apiKey)
             {
@@ -1766,6 +2016,18 @@ namespace Oxide.Plugins
                 s_NewPromocodeUrl = apiUrl + "/main/v3/plugin/promocode/new";
                 s_NewInventoryItemUrl = apiUrl + "/main/v3/plugin/inventory/issue";
                 s_IconUrl = apiUrl + "/static/v2/image/$imageid";
+
+                LogDebug(
+                    @"
+Initialized APIClient with base url {0}, paths are as follows:
+Get inventory: {1}
+Redeem item: {2}
+Get/set balance: {3}
+Create promocode: {4}
+Add item to user's inventory: {5}
+Get icon: {6}
+"
+                );
             }
 
             public static void GetPlayerInventory(
@@ -2059,6 +2321,8 @@ namespace Oxide.Plugins
             public string ApiKey { get; set; }
             public string ApiUrl { get; set; }
             public string[] ChatCommands { get; set; }
+
+            [SuppressMessage("ReSharper", "UnusedAutoPropertyAccessor.Local")]
             public PermissionGiveMethod PermissionGiveKind { get; set; }
 
             public static PluginSettings GetDefaults()
@@ -2078,8 +2342,160 @@ namespace Oxide.Plugins
                 Auto,
                 Internal,
                 TimedPermissions,
+
+                // ReSharper disable once InconsistentNaming
                 IQPermissions
             }
+        }
+
+        private interface IPermissionsIntegrationModule
+        {
+            /// <summary>
+            /// Adds a permission to a player intefinitely
+            /// </summary>
+            /// <param name="player"></param>
+            /// <param name="permissionName"></param>
+            void AddPermission(IPlayer player, string permissionName);
+
+            /// <summary>
+            /// Adds a permission to a player for certain amount of time
+            /// </summary>
+            /// <param name="player"></param>
+            /// <param name="permissionName"></param>
+            /// <param name="duration"></param>
+            void AddPermission(IPlayer player, string permissionName, TimeSpan duration);
+
+            /// <summary>
+            /// Adds player to a group indefinitely
+            /// </summary>
+            /// <param name="player"></param>
+            /// <param name="groupName"></param>
+            void AddGroup(IPlayer player, string groupName);
+
+            /// <summary>
+            /// Adds player to a group for certain amount of time
+            /// </summary>
+            /// <param name="player"></param>
+            /// <param name="groupName"></param>
+            /// <param name="duration"></param>
+            void AddGroup(IPlayer player, string groupName, TimeSpan duration);
+        }
+
+        private abstract class PermissionsIntegrationBase : IPermissionsIntegrationModule
+        {
+            protected readonly gMonetize plugin;
+
+            public PermissionsIntegrationBase(gMonetize plugin)
+            {
+                plugin = plugin;
+            }
+
+            public void AddPermission(IPlayer player, string permissionName)
+            {
+                if (!player.HasPermission(permissionName))
+                {
+                    player.GrantPermission(permissionName);
+                }
+            }
+
+            public abstract void AddPermission(
+                IPlayer player,
+                string permissionName,
+                TimeSpan duration
+            );
+
+            public void AddGroup(IPlayer player, string groupName)
+            {
+                if (!player.BelongsToGroup(groupName))
+                {
+                    player.AddToGroup(groupName);
+                }
+            }
+
+            public abstract void AddGroup(IPlayer player, string groupName, TimeSpan duration);
+        }
+
+        private class NativePermissionsIntegration : PermissionsIntegrationBase
+        {
+            public NativePermissionsIntegration(gMonetize plugin)
+                : base(plugin) { }
+
+            public override void AddPermission(
+                IPlayer player,
+                string permissionName,
+                TimeSpan duration
+            )
+            {
+                throw new NotImplementedException();
+            }
+
+            public override void AddGroup(IPlayer player, string groupName, TimeSpan duration)
+            {
+                throw new NotImplementedException();
+            }
+        }
+
+        private class TimedPermissionsIntegration : PermissionsIntegrationBase
+        {
+            private StringBuilder _fmtSb;
+
+            public TimedPermissionsIntegration(gMonetize plugin)
+                : base(plugin)
+            {
+                _fmtSb = new StringBuilder();
+            }
+
+            public override void AddPermission(
+                IPlayer player,
+                string permissionName,
+                TimeSpan duration
+            )
+            {
+                plugin.server.Command(
+                    "grantperm",
+                    player.Id,
+                    permissionName,
+                    FormatDuration(duration)
+                );
+            }
+
+            public override void AddGroup(IPlayer player, string groupName, TimeSpan duration)
+            {
+                plugin.server.Command("addgroup", player.Id, groupName, FormatDuration(duration));
+            }
+
+            protected string FormatDuration(TimeSpan timeSpan)
+            {
+                if (timeSpan.Days > 0)
+                {
+                    _fmtSb.AppendFormat("{0}d", timeSpan.Days);
+                }
+
+                if (timeSpan.Hours > 0)
+                {
+                    _fmtSb.AppendFormat("{0}h", timeSpan.Hours);
+                }
+
+                if (timeSpan.Minutes > 0)
+                {
+                    _fmtSb.AppendFormat("{0}m", timeSpan.Minutes);
+                }
+
+                if (_fmtSb.Length == 0)
+                {
+                    throw new Exception("Time format is empty");
+                }
+
+                string fmt = _fmtSb.ToString();
+
+                return fmt;
+            }
+        }
+
+        private class IQPermissionsIntegration : TimedPermissionsIntegration
+        {
+            public IQPermissionsIntegration(gMonetize plugin)
+                : base(plugin) { }
         }
     }
 }
