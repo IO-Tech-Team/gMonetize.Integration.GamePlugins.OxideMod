@@ -3,7 +3,6 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
-using System.Drawing;
 using System.Linq;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Converters;
@@ -17,6 +16,8 @@ namespace Oxide.Plugins
 {
     [Info("gMonetize", "gMonetize Project", "2.0.0")]
     [Description("gMonetize integration with OxideMod")]
+    // ReSharper disable once InconsistentNaming
+    // ReSharper disable once ClassNeverInstantiated.Global
     public class gMonetize : CovalencePlugin
     {
         private const string PERMISSION_USE = "gmonetize.use";
@@ -67,6 +68,120 @@ namespace Oxide.Plugins
         protected override void SaveConfig()
         {
             Config.WriteObject(_settings);
+        }
+
+        #endregion
+
+        #region Lang API
+
+        private void SendChatMessage(IPlayer player, string key)
+        {
+            string prefix = TranslatePrefix(player);
+            string message = Translate(key, player);
+
+            player.Message(prefix + message);
+        }
+
+        private void SendChatMessage(IPlayer player, string key, object arg0)
+        {
+            string prefix = TranslatePrefix(player);
+            string format = Translate(key, player);
+
+            player.Message(prefix + string.Format(format, arg0));
+        }
+
+        private void SendChatMessage(IPlayer player, string key, object arg0, object arg1)
+        {
+            string prefix = TranslatePrefix(player);
+            string format = Translate(key, player);
+
+            player.Message(prefix + string.Format(format, arg0, arg1));
+        }
+
+        private void SendChatMessage(
+            IPlayer player,
+            string key,
+            object arg0,
+            object arg1,
+            object arg2
+        )
+        {
+            string prefix = TranslatePrefix(player);
+            string format = Translate(key, player);
+
+            player.Message(prefix + string.Format(format, arg0, arg1, arg2));
+        }
+
+        private void SendChatMessage(IPlayer player, string key, params object[] args)
+        {
+            string prefix = TranslatePrefix(player);
+            string format = Translate(key, player);
+
+            player.Message(prefix + string.Format(format, args));
+        }
+
+        private string TranslatePrefix(IPlayer player)
+        {
+            return Translate("chat.prefix", player);
+        }
+
+        private string Translate(string key, IPlayer player = null)
+        {
+            return lang.GetMessage(key, this, player?.Id);
+        }
+
+        protected override void LoadDefaultMessages()
+        {
+            lang.RegisterMessages(
+                new Dictionary<string, string>
+                {
+                    ["chat.prefix"] = "[gMonetize] ",
+                    ["chat.error.no_permission"] = "You don't have access to this command",
+                    ["ui.header.title"] = "gMonetize",
+                    ["ui.notification.loading_items.title"] = "Loading items",
+                    ["ui.notification.loading_items.msg"] = "Getting what your mom has paid for...",
+                    ["ui.notification.inventory_empty.title"] = "No items",
+                    ["ui.notification.inventory_empty.msg"] = "Seems like your inventory is empty",
+                    ["ui.notification.user_not_found.title"] = "No user",
+                    ["ui.notification.user_not_found.msg"] = "You need to register first",
+                    ["ui.notification.error.authorization.title"] = "Invalid API key",
+                    ["ui.notification.error.authorization.msg"] =
+                        "It's not your fault. Let the admins know!",
+                    ["ui.notification.error.generic.title"] = "Unknown error",
+                    ["ui.notification.error.generic.msg"] = "Houston, we got problems...",
+                    ["ui.itemcard.redeem-btn.text.redeem"] = "Redeem",
+                    ["ui.itemcard.redeem-btn.text.no_space"] = "No space",
+                    ["ui.itemcard.redeem-btn.text.researched"] = "Already researched",
+                    ["ui.itemcard.redeem-btn.text.pending"] = "Redeeming...",
+                    ["ui.itemcard.redeem-btn.text.failed"] = "Failed to redeem\nPress to try again"
+                },
+                this
+            );
+            lang.RegisterMessages(
+                new Dictionary<string, string>
+                {
+                    ["chat.prefix"] = "[gMonetize] ",
+                    ["ui.header.title"] = "gMonetize",
+                    ["ui.notification.loading_items.title"] = "Loading items",
+                    ["ui.notification.loading_items.msg"] = "Getting what your mom has paid for...",
+                    ["ui.notification.inventory_empty.title"] = "No items",
+                    ["ui.notification.inventory_empty.msg"] = "Seems like your inventory is empty",
+                    ["ui.notification.user_not_found.title"] = "No user",
+                    ["ui.notification.user_not_found.msg"] = "You need to register first",
+                    ["ui.notification.error.authorization.title"] = "Invalid API key",
+                    ["ui.notification.error.authorization.msg"] =
+                        "It's not your fault. Let the admins know!",
+                    ["ui.notification.error.generic.title"] = "Unknown error",
+                    ["ui.notification.error.generic.msg"] = "Houston, we got problems...",
+                    ["ui.itemcard.redeem-btn.text.redeem"] = "Redeem",
+                    ["ui.itemcard.redeem-btn.text.no_space"] = "No space",
+                    ["ui.itemcard.redeem-btn.text.researched"] = "Already researched",
+                    ["ui.itemcard.redeem-btn.text.pending"] = "Redeeming...",
+                    ["ui.itemcard.redeem-btn.text.failed"] = "Failed to redeem\nPress to try again"
+                },
+                this,
+                "ru"
+            );
         }
 
         #endregion
@@ -136,6 +251,8 @@ namespace Oxide.Plugins
 
         #endregion
 
+        #region Command handling
+
         private void RegisterCommands()
         {
             covalence.RegisterCommand(CMD_OPEN, this, HandleCommand);
@@ -145,7 +262,7 @@ namespace Oxide.Plugins
             covalence.RegisterCommand(CMD_RETRY_LOAD, this, HandleCommand);
             covalence.RegisterCommand(CMD_REDEEM_ITEM, this, HandleCommand);
 
-            foreach (var command in _settings.ChatCommands)
+            foreach (string command in _settings.ChatCommands)
             {
                 covalence.RegisterCommand(command, this, HandleCommand);
             }
@@ -158,6 +275,14 @@ namespace Oxide.Plugins
 
         private bool HandleCommand(IPlayer player, string command, string[] args)
         {
+            if (command != CMD_CLOSE && !player.HasPermission(PERMISSION_USE))
+            {
+                string prefix = Translate("chat.prefix", player);
+                string msg = Translate("chat.error.no_permission", player);
+
+                player.Message(prefix + msg);
+            }
+
             BasePlayer basePlayer;
 
             if (!TryGetBasePlayer(player, out basePlayer))
@@ -235,6 +360,8 @@ namespace Oxide.Plugins
 
             return true;
         }
+
+        #endregion
 
         private bool TryGetBasePlayer(IPlayer player, out BasePlayer basePlayer)
         {
@@ -454,7 +581,10 @@ namespace Oxide.Plugins
                 if (!_isOpen)
                     return;
 
-                var elements = Builder.ItemCardButtonUpdate(id, InventoryEntryRedeemState.PENDING);
+                IEnumerable<CuiElement> elements = Builder.ItemCardButtonUpdate(
+                    id,
+                    InventoryEntryRedeemState.PENDING
+                );
 
                 CuiHelper.AddUi(_player, (List<CuiElement>)elements);
             }
@@ -534,14 +664,14 @@ namespace Oxide.Plugins
                     return false;
                 }
 
-                var timeSinceWipe = DateTime.Now - SaveRestore.SaveCreatedTime;
+                TimeSpan timeSinceWipe = DateTime.Now - SaveRestore.SaveCreatedTime;
 
                 return entry.wipeBlockDuration > timeSinceWipe;
             }
 
             private bool IsResearched(APIClient.ResearchDto researchDto)
             {
-                var itemDef = ItemManager.FindItemDefinition(researchDto.researchId);
+                ItemDefinition itemDef = ItemManager.FindItemDefinition(researchDto.researchId);
 
                 if (itemDef == null)
                 {
@@ -589,7 +719,7 @@ namespace Oxide.Plugins
                         return InventoryEntryRedeemState.NO_SPACE;
                     }
 
-                    var requiredSlots = entry.contents.Count(
+                    int requiredSlots = entry.contents.Count(
                         x => x.type == APIClient.GoodObjectDto.GoodObjectType.ITEM
                     );
 
@@ -611,7 +741,6 @@ namespace Oxide.Plugins
                 for (int i = 0; i < itemList.Count; i++)
                 {
                     APIClient.InventoryEntryDto entry = itemList[i];
-                    bool canRedeem = Instance.CanRedeemItem(_player, entry);
                     IEnumerable<CuiElement> card = RenderItemCard(i, entry, GetRedeemState(entry));
                     componentList.AddRange(card);
                 }
@@ -1161,8 +1290,8 @@ namespace Oxide.Plugins
                     InventoryEntryRedeemState redeemState
                 )
                 {
-                    var uiName = Names.ItemCard(id);
-                    var components = new List<CuiElement>();
+                    Names.ItemCardName uiName = Names.ItemCard(id);
+                    List<CuiElement> components = new List<CuiElement>();
                     AddItemCardButton(id, uiName, redeemState, components, true);
                     return components;
                 }
@@ -1467,6 +1596,8 @@ namespace Oxide.Plugins
                     );
                 }
             }
+
+            private static class Colors { }
 
             private static class Utilities
             {
