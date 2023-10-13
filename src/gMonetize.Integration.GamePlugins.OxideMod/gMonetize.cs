@@ -1,12 +1,13 @@
 ﻿#define DEBUG
 
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Linq;
 using System.Text;
-using Melanchall.DryWetMidi.Interaction;
+using Facepunch;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Converters;
 using Oxide.Core;
@@ -200,13 +201,13 @@ namespace Oxide.Plugins
         private void Init()
         {
             Instance = this;
+            permission.RegisterPermission(PERMISSION_USE, this);
+            RegisterCommands();
         }
 
         private void OnServerInitialized()
         {
             APIClient.Init(_settings.ApiUrl, _settings.ApiKey);
-
-            RegisterCommands();
 
             if (
                 string.IsNullOrWhiteSpace(_settings.ApiKey)
@@ -388,6 +389,8 @@ namespace Oxide.Plugins
 
         #endregion
 
+        #region Permission helpers
+
         private void LoadPermissionsIntegrationModule()
         {
             switch (_settings.PermissionGiveKind)
@@ -435,6 +438,8 @@ namespace Oxide.Plugins
             );
             return new NativePermissionsIntegration(this);
         }
+
+        #endregion
 
         private bool TryGetBasePlayer(IPlayer player, out BasePlayer basePlayer)
         {
@@ -513,6 +518,8 @@ namespace Oxide.Plugins
                 default:
                     throw new ArgumentOutOfRangeException();
             }
+
+            return true;
         }
 
         private bool TryGiveItemInventoryEntry(
@@ -665,20 +672,20 @@ namespace Oxide.Plugins
         private class UI : FacepunchBehaviour
         {
             private const int ITEMS_PER_PAGE = Builder.CARD_COUNT;
-
             private BasePlayer _player;
-
             private bool _isOpen,
                 _isItemListContainerDrawn;
             private NotificationState _notificationState;
-
             private List<APIClient.InventoryEntryDto> _inventory;
-
+            private List<InventoryCard> _cards;
             private int _currentPageId;
+
+            #region Unity events
 
             private void Awake()
             {
                 _player = GetComponent<BasePlayer>();
+                _cards = new List<InventoryCard>();
                 if (_player == null)
                 {
                     throw new Exception(
@@ -686,12 +693,16 @@ namespace Oxide.Plugins
                     );
                 }
             }
-            
+
             private void OnDestroy()
             {
                 CloseAndReleaseInventory();
             }
-            
+
+            #endregion
+
+            #region Pagination helpers
+
             private int PageCount()
             {
                 if (_inventory == null)
@@ -714,7 +725,7 @@ namespace Oxide.Plugins
             {
                 return _currentPageId > 0;
             }
-            
+
             private List<APIClient.InventoryEntryDto> CurrentPageItems()
             {
                 return _inventory
@@ -722,6 +733,10 @@ namespace Oxide.Plugins
                     .Take(ITEMS_PER_PAGE)
                     .ToList();
             }
+
+            #endregion
+
+            #region Message handlers
 
             public void gMonetize_OpenUI()
             {
@@ -745,8 +760,28 @@ namespace Oxide.Plugins
 
             public void gMonetize_RedeemItemGiveError(string id)
             {
-                var elements = Builder.ItemCardButtonUpdate(id, InventoryEntryRedeemState.FAILED);
-                CuiHelper.AddUi(_player, elements.ToList());
+
+                var card = _cards.Find(x => x.EntryId == id);
+
+                if (card==null)
+                {
+                    throw new Exception("Failed to find rendered card " + id);
+                }
+
+                var components = Pool.GetList<CuiElement>();
+                if (card.ChangeRedeemState(InventoryEntryRedeemState.FAILED, components))
+                {
+                    CuiHelper.AddUi(_player, components);
+                }
+                else
+                {
+                    LogDebug("Called _RedeemItemGiveError, but state hasn't changed {0}", id);
+                }
+
+                Pool.FreeList(ref components);
+
+                /*var elements = Builder.ItemCardButtonUpdate(id, InventoryEntryRedeemState.FAILED);
+                CuiHelper.AddUi(_player, elements.ToList());*/
             }
 
             public void gMonetize_RedeemItemRequestError(object[] args)
@@ -819,7 +854,7 @@ namespace Oxide.Plugins
                 }
 
                 RemoveCurrentPageItems();
-                _currentPageId--;
+                _currentPageId++;
                 DrawInventoryPage();
                 DrawPaginationButtons();
             }
@@ -829,13 +864,34 @@ namespace Oxide.Plugins
                 if (!_isOpen)
                     return;
 
-                IEnumerable<CuiElement> elements = Builder.ItemCardButtonUpdate(
+                var card = _cards.Find(x => x.EntryId == id);
+
+                if (card == null)
+                {
+                    throw new Exception("Failed to find rendered itemcard " + id);
+                }
+
+                var components = Pool.GetList<CuiElement>();
+                if (card.ChangeRedeemState(InventoryEntryRedeemState.PENDING, components))
+                {
+                    CuiHelper.AddUi(_player, components);
+                }
+                else
+                {
+                    LogDebug("Called _RedeemItemPending, but state hasn't changed ({0})", id);
+                }
+
+                Pool.FreeList(ref components);
+
+                /*IEnumerable<CuiElement> elements = Builder.ItemCardButtonUpdate(
                     id,
                     InventoryEntryRedeemState.PENDING
                 );
 
-                CuiHelper.AddUi(_player, (List<CuiElement>)elements);
+                CuiHelper.AddUi(_player, (List<CuiElement>)elements);*/
             }
+
+            #endregion
 
             public APIClient.InventoryEntryDto GetCachedInventoryEntry(string id)
             {
@@ -867,6 +923,7 @@ namespace Oxide.Plugins
                     _isOpen = false;
                 }
 
+                _cards.Clear();
                 _isItemListContainerDrawn = false;
                 _notificationState = NotificationState.None;
                 _inventory = null;
@@ -875,13 +932,21 @@ namespace Oxide.Plugins
 
             private void RemoveCurrentPageItems()
             {
-                foreach (
+                foreach (var card in _cards)
+                {
+                    var uiName = Names.ItemCard(card.EntryId);
+                    CuiHelper.DestroyUi(_player, uiName.Container);
+                }
+
+                _cards.Clear();
+
+                /*foreach (
                     Names.ItemCardName cardName in CurrentPageItems()
                         .Select(item => Names.ItemCard(item.id))
                 )
                 {
                     CuiHelper.DestroyUi(_player, cardName.Container);
-                }
+                }*/
             }
 
             private void DrawPaginationButtons(bool firstTime = false)
@@ -1011,8 +1076,12 @@ namespace Oxide.Plugins
                 for (int i = 0; i < itemList.Count; i++)
                 {
                     APIClient.InventoryEntryDto entry = itemList[i];
-                    IEnumerable<CuiElement> card = RenderItemCard(i, entry, GetRedeemState(entry));
-                    componentList.AddRange(card);
+
+                    var card = new InventoryCard(i, entry, GetRedeemState(entry));
+                    // IEnumerable<CuiElement> card = RenderItemCard(i, entry, GetRedeemState(entry));
+                    // componentList.AddRange();
+                    card.Build(componentList);
+                    _cards.Add(card);
                 }
 
                 LogDebug(
@@ -1021,12 +1090,12 @@ namespace Oxide.Plugins
                     componentList.Count
                 );
 
-                LogDebug("Components json:\n{0}", CuiHelper.ToJson(componentList));
+                // LogDebug("Components json:\n{0}", CuiHelper.ToJson(componentList));
 
                 CuiHelper.AddUi(_player, componentList);
             }
 
-            private IEnumerable<CuiElement> RenderItemCard(
+            /*private IEnumerable<CuiElement> RenderItemCard(
                 int containerIndex,
                 APIClient.InventoryEntryDto item,
                 InventoryEntryRedeemState redeemState
@@ -1067,7 +1136,7 @@ namespace Oxide.Plugins
                 );
 
                 return card;
-            }
+            }*/
 
             #region Notifications
 
@@ -1173,6 +1242,105 @@ namespace Oxide.Plugins
 
             #endregion
 
+            private class InventoryCard
+            {
+                public int ContainerIndex;
+                public string EntryName;
+                public bool HasAmount;
+                public int Amount;
+                public string EntryId;
+                public InventoryEntryRedeemState RedeemState;
+                public ICuiComponent IconComponent;
+
+                public InventoryCard(
+                    int containerIndex,
+                    APIClient.InventoryEntryDto dto,
+                    InventoryEntryRedeemState redeemState
+                )
+                {
+                    ContainerIndex = containerIndex;
+                    EntryName = dto.name;
+                    HasAmount =
+                        dto.type == APIClient.InventoryEntryDto.InventoryEntryType.ITEM
+                        && dto.item.amount > 1;
+                    if (HasAmount)
+                        Amount = dto.item.amount;
+                    EntryId = dto.id;
+                    RedeemState = redeemState;
+                    IconComponent = CreateIconComponent(dto);
+                }
+
+                public void Build(List<CuiElement> components)
+                {
+                    var uiName = Names.ItemCard(EntryId);
+                    Builder.ItemCardContainer(uiName, ContainerIndex, components, false);
+                    Builder.ItemCardStatic(
+                        uiName,
+                        components,
+                        EntryName,
+                        IconComponent,
+                        HasAmount,
+                        Amount
+                    );
+                    Builder.ItemCardButton(uiName, EntryId, RedeemState, components, false);
+                }
+
+                public bool ChangeRedeemState(
+                    InventoryEntryRedeemState state,
+                    List<CuiElement> components
+                )
+                {
+                    if (RedeemState == state)
+                    {
+                        return false;
+                    }
+
+                    Builder.ItemCardButton(
+                        Names.ItemCard(EntryId),
+                        EntryId,
+                        state,
+                        components,
+                        true
+                    );
+                    RedeemState = state;
+                    return true;
+                }
+
+                public bool ChangeIndex(int containerIndex, List<CuiElement> components)
+                {
+                    if (containerIndex == ContainerIndex)
+                    {
+                        return false;
+                    }
+
+                    Builder.ItemCardContainer(
+                        Names.ItemCard(EntryId),
+                        containerIndex,
+                        components,
+                        true
+                    );
+                    ContainerIndex = containerIndex;
+                    return true;
+                }
+
+                private static ICuiComponent CreateIconComponent(APIClient.InventoryEntryDto dto)
+                {
+                    if (dto.iconId != null)
+                    {
+                        return new CuiRawImageComponent
+                        {
+                            Url = APIClient.GetInventoryEntryIconUrl(dto.iconId)
+                        };
+                    }
+
+                    if (dto.type == APIClient.InventoryEntryDto.InventoryEntryType.ITEM)
+                    {
+                        return new CuiImageComponent { ItemId = dto.item.itemId };
+                    }
+
+                    return new CuiRawImageComponent { Url = Icons.ITEM_DEFAULT };
+                }
+            }
 
             private enum NotificationState
             {
@@ -1363,7 +1531,8 @@ namespace Oxide.Plugins
                             {
                                 new CuiButtonComponent
                                 {
-                                    Color = bPrev ? COLOR_ENABLED : COLOR_DISABLED
+                                    Color = bPrev ? COLOR_ENABLED : COLOR_DISABLED,
+                                    Command = CMD_PREV_PAGE
                                 },
                                 new CuiRectTransformComponent
                                 {
@@ -1398,7 +1567,8 @@ namespace Oxide.Plugins
                             {
                                 new CuiButtonComponent
                                 {
-                                    Color = bNext ? COLOR_ENABLED : COLOR_DISABLED
+                                    Color = bNext ? COLOR_ENABLED : COLOR_DISABLED,
+                                    Command = CMD_NEXT_PAGE
                                 },
                                 new CuiRectTransformComponent
                                 {
@@ -1555,30 +1725,14 @@ namespace Oxide.Plugins
                     };
                 }
 
-                public static IEnumerable<CuiElement> ItemCardButtonUpdate(
-                    string id,
-                    InventoryEntryRedeemState redeemState
-                )
-                {
-                    Names.ItemCardName uiName = Names.ItemCard(id);
-                    List<CuiElement> components = new List<CuiElement>();
-                    AddItemCardButton(id, uiName, redeemState, components, true);
-                    return components;
-                }
-
-                public static IEnumerable<CuiElement> ItemCard(
+                public static void ItemCardContainer(
+                    Names.ItemCardName uiName,
                     int containerIndex,
-                    string id,
-                    string name,
-                    int? amount,
-                    ICuiComponent icon,
-                    InventoryEntryRedeemState redeemState
+                    List<CuiElement> components,
+                    bool update
                 )
                 {
-                    Names.ItemCardName uiName = Names.ItemCard(id);
-
-                    List<CuiElement> components = new List<CuiElement>
-                    {
+                    components.Add(
                         new CuiElement
                         {
                             Parent = Names.ITEMLIST_CONTAINER,
@@ -1593,8 +1747,22 @@ namespace Oxide.Plugins
                                     COLUMN_GAP,
                                     ROW_GAP
                                 )
-                            }
-                        },
+                            },
+                            Update = update
+                        }
+                    );
+                }
+
+                public static void ItemCardStatic(
+                    Names.ItemCardName uiName,
+                    List<CuiElement> components,
+                    string name,
+                    ICuiComponent icon,
+                    bool hasAmount,
+                    int amount
+                )
+                {
+                    components.Add(
                         new CuiElement
                         {
                             Parent = uiName.Container,
@@ -1608,7 +1776,10 @@ namespace Oxide.Plugins
                                     AnchorMax = "0.95 0.25"
                                 }
                             }
-                        },
+                        }
+                    );
+
+                    components.Add(
                         new CuiElement
                         {
                             Parent = uiName.FooterContainer,
@@ -1622,7 +1793,9 @@ namespace Oxide.Plugins
                                     AnchorMax = "0.5 1"
                                 }
                             }
-                        },
+                        }
+                    );
+                    components.Add(
                         new CuiElement
                         {
                             Parent = uiName.TextContainer,
@@ -1642,7 +1815,9 @@ namespace Oxide.Plugins
                                     AnchorMax = "1 1"
                                 }
                             }
-                        },
+                        }
+                    );
+                    components.Add(
                         new CuiElement
                         {
                             Parent = uiName.Container,
@@ -1657,9 +1832,9 @@ namespace Oxide.Plugins
                                 }
                             }
                         }
-                    };
+                    );
 
-                    if (amount != null)
+                    if (hasAmount)
                     {
                         components.Add(
                             new CuiElement
@@ -1684,184 +1859,122 @@ namespace Oxide.Plugins
                             }
                         );
                     }
-
-                    AddItemCardButton(id, uiName, redeemState, components);
-
-                    return components;
                 }
-            }
 
-            private static void AddItemCardButton(
-                string id,
-                Names.ItemCardName uiName,
-                InventoryEntryRedeemState redeemState,
-                List<CuiElement> components,
-                bool update = false
-            )
-            {
-                string btnColor,
-                    btnIconUrl,
-                    btnText,
-                    btnIconColor,
-                    btnTextColor;
-
-                if (redeemState == InventoryEntryRedeemState.READY)
+                public static void ItemCardButton(
+                    Names.ItemCardName uiName,
+                    string entryId,
+                    InventoryEntryRedeemState redeemState,
+                    List<CuiElement> components,
+                    bool update
+                )
                 {
-                    btnColor = "0.5 0.65 0.5 0.7";
-                    btnTextColor = "0.7 0.85 0.7 0.85";
-                    btnIconColor = "0.7 0.85 0.7 0.85";
-                    btnIconUrl = Icons.REDEEM;
-                    btnText = "Redeem";
-                }
-                else
-                {
-                    btnColor = "0.5 0.5 0.5 0.7";
-                    btnTextColor = "0.65 0.65 0.65 0.85";
-                    btnIconColor = "0.6 0.6 0.6 0.85";
-                    btnText = "No\nspace";
+                    string btnColor,
+                        btnIconUrl,
+                        btnText,
+                        btnIconColor,
+                        btnTextColor,
+                        btnCommand;
 
-                    switch (redeemState)
+                    if (redeemState == InventoryEntryRedeemState.READY)
                     {
-                        case InventoryEntryRedeemState.NO_SPACE:
-                            btnText = "No\nspace";
-                            btnIconUrl = "https://i.imgur.com/xEwbjZ0.png";
-                            break;
-                        case InventoryEntryRedeemState.WIPE_BLOCKED:
-                            btnText = "Wipe\nblocked";
-                            btnIconUrl = Icons.REDEEM_WIPEBLOCKED;
-                            break;
-                        case InventoryEntryRedeemState.PENDING:
-                            btnText = "Redeeming...";
-                            btnIconUrl = Icons.NOTIFICATION_PENDING;
-                            break;
-                        case InventoryEntryRedeemState.FAILED:
-                            btnText = "Failed\nclick to retry";
-                            btnIconUrl = Icons.REDEEM_RETRY;
-                            break;
-                        default:
-                            btnIconUrl = string.Empty;
-                            break;
+                        btnColor = "0.5 0.65 0.5 0.7";
+                        btnTextColor = "0.7 0.85 0.7 0.85";
+                        btnIconColor = "0.7 0.85 0.7 0.85";
+                        btnIconUrl = Icons.REDEEM;
+                        btnText = "Redeem";
+                        btnCommand = CMD_REDEEM_ITEM + " " + entryId;
                     }
-                }
+                    else
+                    {
+                        btnColor = "0.5 0.5 0.5 0.7";
+                        btnTextColor = "0.65 0.65 0.65 0.85";
+                        btnIconColor = "0.6 0.6 0.6 0.85";
+                        btnText = "No\nspace";
+                        btnCommand = null;
+                        btnIconUrl = Icons.CLOSE_CROSS;
 
-                if (update)
-                {
-                    components.AddRange(
-                        new[]
+                        switch (redeemState)
                         {
-                            new CuiElement
+                            case InventoryEntryRedeemState.NO_SPACE:
+                                btnText = "No\nspace";
+                                btnIconUrl = "https://i.imgur.com/xEwbjZ0.png";
+                                break;
+                            case InventoryEntryRedeemState.WIPE_BLOCKED:
+                                btnText = "Wipe\nblocked";
+                                btnIconUrl = Icons.REDEEM_WIPEBLOCKED;
+                                break;
+                            case InventoryEntryRedeemState.PENDING:
+                                btnText = "Redeeming...";
+                                btnIconUrl = Icons.NOTIFICATION_PENDING;
+                                break;
+                            case InventoryEntryRedeemState.FAILED:
+                                btnText = "Failed\nclick to retry";
+                                btnIconUrl = Icons.REDEEM_RETRY;
+                                break;
+                        }
+                    }
+
+                    components.Add(
+                        new CuiElement
+                        {
+                            Parent = uiName.FooterContainer,
+                            Name = uiName.Btn,
+                            Components =
                             {
-                                Name = uiName.Btn,
-                                Components =
+                                new CuiButtonComponent { Command = btnCommand, Color = btnColor },
+                                new CuiRectTransformComponent
                                 {
-                                    new CuiButtonComponent
-                                    {
-                                        Color = btnColor,
-                                        Command =
-                                            redeemState == InventoryEntryRedeemState.READY
-                                                ? CMD_REDEEM_ITEM + " " + id
-                                                : null
-                                    }
-                                },
-                                Update = true
+                                    AnchorMin = "0.5 0",
+                                    AnchorMax = "0.99 1"
+                                }
                             },
-                            new CuiElement
-                            {
-                                Name = uiName.BtnText,
-                                Components =
-                                {
-                                    new CuiTextComponent
-                                    {
-                                        Text = btnText,
-                                        FontSize = 12,
-                                        Align = TextAnchor.MiddleCenter,
-                                        Color = btnTextColor,
-                                        Font = Fonts.ROBOTOCONDENSED_REGULAR
-                                    }
-                                },
-                                Update = true
-                            },
-                            new CuiElement
-                            {
-                                Name = uiName.BtnIcon,
-                                Components =
-                                {
-                                    new CuiRawImageComponent
-                                    {
-                                        Url = btnIconUrl,
-                                        Color = btnIconColor,
-                                    }
-                                },
-                                Update = true
-                            }
+                            Update = update
                         }
                     );
-                }
-                else
-                {
-                    components.AddRange(
-                        new[]
+                    components.Add(
+                        new CuiElement
                         {
-                            new CuiElement
+                            Parent = uiName.Btn,
+                            Name = uiName.BtnIcon,
+                            Components =
                             {
-                                Parent = uiName.FooterContainer,
-                                Name = uiName.Btn,
-                                Components =
+                                new CuiRawImageComponent
                                 {
-                                    new CuiButtonComponent
-                                    {
-                                        Color = btnColor,
-                                        Command =
-                                            redeemState == InventoryEntryRedeemState.READY
-                                                ? CMD_REDEEM_ITEM + " " + id
-                                                : null
-                                    },
-                                    new CuiRectTransformComponent
-                                    {
-                                        AnchorMin = "0.5 0",
-                                        AnchorMax = "0.99 1"
-                                    }
+                                    Url = btnIconUrl,
+                                    Color = btnIconColor,
+                                },
+                                new CuiRectTransformComponent
+                                {
+                                    AnchorMin = "0.02 0.28",
+                                    AnchorMax = "0.3 0.74"
                                 }
                             },
-                            new CuiElement
+                            Update = update
+                        }
+                    );
+                    components.Add(
+                        new CuiElement
+                        {
+                            Parent = uiName.Btn,
+                            Name = uiName.BtnText,
+                            Components =
                             {
-                                Parent = uiName.Btn,
-                                Name = uiName.BtnText,
-                                Components =
+                                new CuiTextComponent
                                 {
-                                    new CuiTextComponent
-                                    {
-                                        Text = btnText,
-                                        FontSize = 12,
-                                        Align = TextAnchor.MiddleCenter,
-                                        Color = btnTextColor,
-                                        Font = Fonts.ROBOTOCONDENSED_REGULAR
-                                    },
-                                    new CuiRectTransformComponent
-                                    {
-                                        AnchorMin = "0.25 0",
-                                        AnchorMax = "1 1"
-                                    }
+                                    Text = btnText,
+                                    FontSize = 12,
+                                    Align = TextAnchor.MiddleCenter,
+                                    Color = btnTextColor,
+                                    Font = Fonts.ROBOTOCONDENSED_REGULAR
+                                },
+                                new CuiRectTransformComponent
+                                {
+                                    AnchorMin = "0.25 0",
+                                    AnchorMax = "1 1"
                                 }
                             },
-                            new CuiElement
-                            {
-                                Parent = uiName.Btn,
-                                Name = uiName.BtnIcon,
-                                Components =
-                                {
-                                    new CuiRawImageComponent
-                                    {
-                                        Url = btnIconUrl,
-                                        Color = btnIconColor,
-                                    },
-                                    new CuiRectTransformComponent
-                                    {
-                                        AnchorMin = "0.02 0.28",
-                                        AnchorMax = "0.3 0.74"
-                                    }
-                                }
-                            }
+                            Update = update
                         }
                     );
                 }
@@ -2045,7 +2158,14 @@ Get/set balance: {3}
 Create promocode: {4}
 Add item to user's inventory: {5}
 Get icon: {6}
-"
+",
+                    apiUrl,
+                    s_InventoryUrl,
+                    s_RedeemUrl,
+                    s_BalanceUrl,
+                    s_NewPromocodeUrl,
+                    s_NewInventoryItemUrl,
+                    s_IconUrl
                 );
             }
 
@@ -2409,6 +2529,11 @@ Get icon: {6}
                 plugin = plugin;
             }
 
+            public virtual bool ValidateRequirements()
+            {
+                return true;
+            }
+
             public void AddPermission(IPlayer player, string permissionName)
             {
                 if (!player.HasPermission(permissionName))
@@ -2464,6 +2589,19 @@ Get icon: {6}
                 _fmtSb = new StringBuilder();
             }
 
+            public override bool ValidateRequirements()
+            {
+                if (plugin.plugins.Find("TimedPermissions") == null)
+                {
+                    plugin.LogWarning(
+                        "Permissions integration module warning: TimedPermissions was not found"
+                    );
+                    return false;
+                }
+
+                return true;
+            }
+
             public override void AddPermission(
                 IPlayer player,
                 string permissionName,
@@ -2515,6 +2653,19 @@ Get icon: {6}
         {
             public IQPermissionsIntegration(gMonetize plugin)
                 : base(plugin) { }
+
+            public override bool ValidateRequirements()
+            {
+                if (plugin.plugins.Find("IQPermissions") == null)
+                {
+                    plugin.LogWarning(
+                        "Permissions integration module warning: IQPermissions was not found"
+                    );
+                    return false;
+                }
+
+                return true;
+            }
         }
     }
 }
