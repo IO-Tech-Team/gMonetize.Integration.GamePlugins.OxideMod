@@ -1,7 +1,6 @@
 ﻿#define DEBUG
 
 using System;
-using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
@@ -15,18 +14,19 @@ using Oxide.Core.Libraries;
 using Oxide.Core.Libraries.Covalence;
 using Oxide.Game.Rust.Cui;
 using UnityEngine;
+
 // ReSharper disable StringLiteralTypo
 // ReSharper disable IdentifierTypo
 #pragma warning disable CS0649 // Field is never assigned to, and will always have its default value
 
 namespace Oxide.Plugins
 {
+    // ReSharper disable once InconsistentNaming
+    // ReSharper disable once ClassNeverInstantiated.Global
     [Info("gMonetize", "gMonetize Project", "2.0.0")]
     [Description("gMonetize integration with OxideMod")]
     [SuppressMessage("ReSharper", "UnusedMember.Local")]
     [SuppressMessage("ReSharper", "MemberCanBePrivate.Local")]
-    // ReSharper disable once InconsistentNaming
-    // ReSharper disable once ClassNeverInstantiated.Global
     public class gMonetize : CovalencePlugin
     {
         private const string PERMISSION_USE = "gmonetize.use";
@@ -321,7 +321,6 @@ namespace Oxide.Plugins
                     basePlayer.SendMessage(nameof(UI.gMonetize_NextPage));
                     break;
 
-                case CMD_PREV_PAGE:
                     basePlayer.SendMessage(nameof(UI.gMonetize_PreviousPage));
                     break;
 
@@ -337,29 +336,52 @@ namespace Oxide.Plugins
                     break;
 
                 case CMD_REDEEM_ITEM:
+                    string inventoryEntryId = args[0];
+
+                    LogDebug("Player {0} wants to receive item {1}", player, inventoryEntryId);
+
                     APIClient.RedeemItem(
                         player.Id,
-                        args[0],
+                        inventoryEntryId,
                         () =>
                         {
-                            var component = basePlayer.GetComponent<UI>();
-                            var inventoryEntry = component.GetCachedInventoryEntry(args[0]);
+                            LogDebug(
+                                "API has responded with SUCCESS to an attempt of the player {0} to redeem item {1}",
+                                player,
+                                inventoryEntryId
+                            );
+
+                            UI component = basePlayer.GetComponent<UI>();
+                            APIClient.InventoryEntryDto inventoryEntry =
+                                component.GetCachedInventoryEntry(inventoryEntryId);
                             if (!TryGiveInventoryEntry(basePlayer, inventoryEntry))
                             {
-                                component.gMonetize_RedeemItemGiveError(args[0]);
+                                component.gMonetize_RedeemItemGiveError(inventoryEntryId);
                             }
                             else
                             {
-                                component.gMonetize_RedeemItemOk(args[0]);
+                                component.gMonetize_RedeemItemOk(inventoryEntryId);
                             }
                         },
                         code =>
+                        {
+                            LogDebug(
+                                "API has responded with FAIL (code {0}) to an attempt of the player {1} to redeem item {2}",
+                                code,
+                                player,
+                                inventoryEntryId
+                            );
+
                             basePlayer.SendMessage(
                                 nameof(UI.gMonetize_RedeemItemRequestError),
-                                new object[] { args[0], code }
-                            )
+                                new object[] { inventoryEntryId, code }
+                            );
+                        }
                     );
-                    basePlayer.SendMessage(nameof(UI.gMonetize_RedeemItemPending), args[0]);
+                    basePlayer.SendMessage(
+                        nameof(UI.gMonetize_RedeemItemPending),
+                        inventoryEntryId
+                    );
                     break;
 
                 default:
@@ -446,227 +468,43 @@ namespace Oxide.Plugins
             return (basePlayer = player.Object as BasePlayer) != null;
         }
 
-        private bool CanRedeemItem(BasePlayer player, APIClient.InventoryEntryDto inventoryEntry)
-        {
-            switch (inventoryEntry.type)
-            {
-                case APIClient.InventoryEntryDto.InventoryEntryType.ITEM:
-                    return GetPlayerAvailableSlots(player) > 0;
-                case APIClient.InventoryEntryDto.InventoryEntryType.KIT:
-
-                    break;
-                case APIClient.InventoryEntryDto.InventoryEntryType.RESEARCH:
-                    return !player.blueprints.IsUnlocked(
-                        ItemManager.FindItemDefinition(inventoryEntry.research.researchId)
-                    );
-                case APIClient.InventoryEntryDto.InventoryEntryType.CUSTOM:
-                    break;
-
-                default:
-                    return true;
-            }
-
-            return true;
-        }
-
-        private int GetPlayerAvailableSlots(BasePlayer player)
-        {
-            int containerMainSlots = player.inventory.containerMain.capacity;
-            int containerBeltSlots = player.inventory.containerBelt.capacity;
-            int containerMainItems = player.inventory.containerMain.itemList.Count;
-            int containerBeltItems = player.inventory.containerBelt.itemList.Count;
-
-            // TODO: Take stacking into account
-
-            return containerMainSlots
-                + containerBeltSlots
-                - containerMainItems
-                - containerBeltItems;
-        }
-
-        private bool TryGiveInventoryEntry(
-            BasePlayer player,
-            APIClient.InventoryEntryDto inventoryEntry
-        )
-        {
-            if (IsWipeBlocked(inventoryEntry))
-            {
-                return false;
-            }
-
-            if (!HasAvailableSpace(player, inventoryEntry))
-            {
-                return false;
-            }
-
-            switch (inventoryEntry.type)
-            {
-                case APIClient.InventoryEntryDto.InventoryEntryType.ITEM:
-                    return TryGiveItemInventoryEntry(player, inventoryEntry);
-                case APIClient.InventoryEntryDto.InventoryEntryType.KIT:
-                    break;
-                case APIClient.InventoryEntryDto.InventoryEntryType.RANK:
-                    return TryGiveGroupInventoryEntry(player, inventoryEntry);
-                    break;
-                case APIClient.InventoryEntryDto.InventoryEntryType.RESEARCH:
-                    break;
-                case APIClient.InventoryEntryDto.InventoryEntryType.CUSTOM:
-                    break;
-                case APIClient.InventoryEntryDto.InventoryEntryType.PERMISSION:
-                    return TryGivePermissionInventoryEntry(player, inventoryEntry);
-                    break;
-                default:
-                    throw new ArgumentOutOfRangeException();
-            }
-
-            return true;
-        }
-
-        private bool TryGiveItemInventoryEntry(
-            BasePlayer player,
-            APIClient.InventoryEntryDto inventoryEntry
-        )
-        {
-            var itemDefinition = ItemManager.FindItemDefinition(inventoryEntry.item.itemId);
-
-            if (!itemDefinition)
-            {
-                return false;
-            }
-
-            if (GetPlayerAvailableSlots(player) < 1)
-            {
-                return false;
-            }
-
-            var item = ItemManager.Create(
-                itemDefinition,
-                inventoryEntry.item.amount,
-                inventoryEntry.item.meta.skinId ?? 0ul
-            );
-
-            player.GiveItem(item, BaseEntity.GiveItemReason.PickedUp);
-
-            return true;
-        }
-
-        private bool TryGivePermissionInventoryEntry(
-            BasePlayer player,
-            APIClient.InventoryEntryDto inventoryEntry
-        )
-        {
-            if (!inventoryEntry.permission.duration.HasValue)
-            {
-                _permissionsIntegrationModule.AddPermission(
-                    player.IPlayer,
-                    inventoryEntry.permission.value
-                );
-            }
-            else
-            {
-                _permissionsIntegrationModule.AddPermission(
-                    player.IPlayer,
-                    inventoryEntry.permission.value,
-                    inventoryEntry.permission.duration.Value
-                );
-            }
-
-            return true;
-        }
-
-        private bool TryGiveGroupInventoryEntry(
-            BasePlayer player,
-            APIClient.InventoryEntryDto inventoryEntry
-        )
-        {
-            if (!inventoryEntry.rank.duration.HasValue)
-            {
-                _permissionsIntegrationModule.AddGroup(
-                    player.IPlayer,
-                    inventoryEntry.rank.groupName
-                );
-            }
-            else
-            {
-                _permissionsIntegrationModule.AddGroup(
-                    player.IPlayer,
-                    inventoryEntry.rank.groupName,
-                    inventoryEntry.rank.duration.Value
-                );
-            }
-
-            return true;
-        }
-
-        private bool HasAvailableSpace(
-            BasePlayer player,
-            APIClient.InventoryEntryDto inventoryEntry
-        )
-        {
-            var slots = GetPlayerAvailableSlots(player);
-
-            if (inventoryEntry.type == APIClient.InventoryEntryDto.InventoryEntryType.ITEM)
-            {
-                return slots != 0;
-            }
-
-            if (
-                inventoryEntry.type == APIClient.InventoryEntryDto.InventoryEntryType.KIT
-                || inventoryEntry.type == APIClient.InventoryEntryDto.InventoryEntryType.CUSTOM
-            )
-            {
-                return slots
-                    >= inventoryEntry.contents.Count(
-                        c => c.type == APIClient.GoodObjectDto.GoodObjectType.ITEM
-                    );
-            }
-
-            return true;
-        }
-
         private bool IsWipeBlocked(APIClient.InventoryEntryDto inventoryEntry)
         {
             if (inventoryEntry.wipeBlockDuration == null)
+            {
                 return false;
+            }
 
-            var timeSinceWipe = DateTime.Now - SaveRestore.SaveCreatedTime;
+            TimeSpan timeSinceWipe = DateTime.Now - SaveRestore.SaveCreatedTime;
 
             return inventoryEntry.wipeBlockDuration < timeSinceWipe;
         }
 
-        private bool IsUnlocked(
-            BasePlayer player,
-            APIClient.ResearchDto research,
-            out ItemDefinition itemDefinition
-        )
+        private bool HasEnoughSpace(BasePlayer player, APIClient.ItemDto dto)
         {
-            return IsUnlocked(player, research.researchId, out itemDefinition);
-        }
+            ItemDefinition itemDef = ItemManager.FindItemDefinition(dto.itemId);
+            int maxStack = itemDef.stackable;
 
-        private bool IsUnlocked(
-            BasePlayer player,
-            APIClient.GoodObjectDto goodObject,
-            out ItemDefinition itemDefinition
-        )
-        {
-            return IsUnlocked(player, goodObject.researchId, out itemDefinition);
-        }
+            int requiredSlots = Mathf.CeilToInt((float)dto.amount / maxStack);
+            int freeSlots = GetPlayerFreeSlots(player);
 
-        private bool IsUnlocked(
-            BasePlayer player,
-            int blueprintId,
-            out ItemDefinition itemDefinition
-        )
-        {
-            itemDefinition = ItemManager.FindItemDefinition(blueprintId);
-
-            if (itemDefinition == null)
+            if (freeSlots > requiredSlots)
             {
-                LogError("Failed to find ItemDefinition for blueprint ID {0}", blueprintId);
-                return false;
+                return true;
             }
 
-            return player.blueprints.IsUnlocked(itemDefinition);
+            List<Item> sameItems = player.inventory.FindItemsByItemID(dto.itemId);
+            int amountLeft = dto.amount - maxStack * freeSlots;
+
+            int sameItemsAmountLeft = sameItems.Select(item => maxStack - item.amount).Sum();
+            return sameItemsAmountLeft >= amountLeft;
+        }
+
+        private int GetPlayerFreeSlots(BasePlayer player)
+        {
+            ItemContainer cm = player.inventory.containerMain;
+            ItemContainer cb = player.inventory.containerBelt;
+            return (cm.capacity - cm.itemList.Count) + (cb.capacity - cb.itemList.Count);
         }
 
         private class UI : FacepunchBehaviour
@@ -678,6 +516,8 @@ namespace Oxide.Plugins
             private NotificationState _notificationState;
             private List<APIClient.InventoryEntryDto> _inventory;
             private List<InventoryCard> _cards;
+            private Dictionary<string, APIClient.InventoryEntryDto> _idToDto;
+            private Dictionary<string, InventoryCard> _idToCard;
             private int _currentPageId;
 
             #region Unity events
@@ -686,6 +526,8 @@ namespace Oxide.Plugins
             {
                 _player = GetComponent<BasePlayer>();
                 _cards = new List<InventoryCard>();
+                _idToDto = new Dictionary<string, APIClient.InventoryEntryDto>();
+                _idToCard = new Dictionary<string, InventoryCard>();
                 if (_player == null)
                 {
                     throw new Exception(
@@ -705,7 +547,7 @@ namespace Oxide.Plugins
 
             private int PageCount()
             {
-                if (_inventory == null)
+                if (_inventory == null || _inventory.Count == 0)
                 {
                     return 0;
                 }
@@ -734,6 +576,16 @@ namespace Oxide.Plugins
                     .ToList();
             }
 
+            private int CountItemsOnCurrentPage()
+            {
+                return CountItemsOnPage(_currentPageId);
+            }
+
+            private int CountItemsOnPage(int pageIndex)
+            {
+                return _inventory.Count - ITEMS_PER_PAGE * pageIndex;
+            }
+
             #endregion
 
             #region Message handlers
@@ -741,34 +593,95 @@ namespace Oxide.Plugins
             public void gMonetize_OpenUI()
             {
                 if (_isOpen)
+                {
                     return;
+                }
 
                 CuiHelper.AddUi(_player, Builder.Base());
                 DrawPaginationButtons(true);
                 _isOpen = true;
             }
 
-            public void gMonetize_LoadingItems() =>
+            public void gMonetize_LoadingItems()
+            {
                 DrawNotification(NotificationState.LoadingItems);
+            }
 
             public void gMonetize_CloseUI()
             {
                 CloseAndReleaseInventory();
             }
 
-            public void gMonetize_RedeemItemOk(string inventoryEntryId) { }
+            public void gMonetize_RedeemItemOk(string inventoryEntryId)
+            {
+                APIClient.InventoryEntryDto inventoryEntry;
+
+                if (!_idToDto.TryGetValue(inventoryEntryId, out inventoryEntry))
+                {
+                    Instance.LogWarning(
+                        "gMonetize_RedeemItemOk: Failed to find inventory entry {0} (player {1})",
+                        inventoryEntryId,
+                        _player.UserIDString
+                    );
+                    return;
+                }
+
+                _inventory.Remove(inventoryEntry);
+
+                if (!_inventory.Any())
+                {
+                    RemoveItemListContainer();
+                    DrawNotification(NotificationState.InventoryEmpty);
+                    return;
+                }
+
+                if (_cards.Count == 1)
+                {
+                    RemoveAllCards(true);
+                    _currentPageId--;
+                    DrawInventoryPage();
+                }
+                else
+                {
+                    RemoveInventoryCard(inventoryEntryId);
+                }
+            }
+
+            private void RemoveInventoryCard(string inventoryEntryId)
+            {
+                InventoryCard card;
+                if (!_idToCard.TryGetValue(inventoryEntryId, out card))
+                {
+                    LogDebug("RemoveInventoryCard({0}): failed to find card");
+                    return;
+                }
+
+                _idToCard.Remove(inventoryEntryId);
+                _cards.RemoveAt(card.ContainerIndex);
+
+                if (card.ContainerIndex != _cards.Count)
+                {
+                    List<CuiElement> components = Pool.GetList<CuiElement>();
+                    for (int i = card.ContainerIndex; i < _cards.Count; i++)
+                    {
+                        InventoryCard card2 = _cards[i];
+                        card2.ChangeIndex(i, components);
+                    }
+
+                    CuiHelper.AddUi(_player, components);
+                }
+            }
 
             public void gMonetize_RedeemItemGiveError(string id)
             {
+                InventoryCard card = _cards.Find(x => x.EntryId == id);
 
-                var card = _cards.Find(x => x.EntryId == id);
-
-                if (card==null)
+                if (card == null)
                 {
                     throw new Exception("Failed to find rendered card " + id);
                 }
 
-                var components = Pool.GetList<CuiElement>();
+                List<CuiElement> components = Pool.GetList<CuiElement>();
                 if (card.ChangeRedeemState(InventoryEntryRedeemState.FAILED, components))
                 {
                     CuiHelper.AddUi(_player, components);
@@ -779,25 +692,48 @@ namespace Oxide.Plugins
                 }
 
                 Pool.FreeList(ref components);
-
-                /*var elements = Builder.ItemCardButtonUpdate(id, InventoryEntryRedeemState.FAILED);
-                CuiHelper.AddUi(_player, elements.ToList());*/
             }
 
             public void gMonetize_RedeemItemRequestError(object[] args)
             {
-                /*string inventoryEntryId = (string)args[0];
-                int errorCode = (int)args[1];*/
+                string inventoryEntryId = (string)args[0];
+                int errorCode = (int)args[1];
+
+                InventoryCard card = _idToCard[inventoryEntryId];
+
+                if (card == null)
+                {
+                    LogDebug(
+                        "gMonetize_RedeemItemRequestError: Failed to find rendered card {0} in ui of player {1}",
+                        inventoryEntryId,
+                        _player.UserIDString
+                    );
+                    return;
+                }
+
+                if (errorCode == 404)
+                {
+                    RemoveInventoryCard(inventoryEntryId);
+                }
+                else
+                {
+                    List<CuiElement> components = Pool.GetList<CuiElement>();
+                    card.ChangeRedeemState(InventoryEntryRedeemState.FAILED, components);
+                    CuiHelper.AddUi(_player, components);
+                    Pool.FreeList(ref components);
+                }
             }
 
             public void gMonetize_InventoryReceived(
                 List<APIClient.InventoryEntryDto> inventoryEntries
             )
             {
-                _currentPageId = 0;
-
+                LogDebug("gMonetize_InventoryReceived(Count:{0})", inventoryEntries.Count);
                 if (!_isOpen)
+                {
+                    LogDebug("UI is not open");
                     return;
+                }
 
                 if (!inventoryEntries.Any())
                 {
@@ -806,6 +742,8 @@ namespace Oxide.Plugins
                 }
 
                 _inventory = inventoryEntries;
+                _inventory.ForEach(x => _idToDto.Add(x.id, x));
+
                 RemoveNotification();
                 DrawInventoryPage();
                 DrawPaginationButtons();
@@ -815,7 +753,10 @@ namespace Oxide.Plugins
             {
                 LogDebug("gMonetize_InventoryReceiveFail({0})", errorCode);
                 if (!_isOpen)
+                {
+                    LogDebug("UI is not open");
                     return;
+                }
 
                 switch (errorCode)
                 {
@@ -837,10 +778,11 @@ namespace Oxide.Plugins
             {
                 if (!HasPreviousPage() || !_isOpen)
                 {
+                    LogDebug("gMonetize_PreviousPage(): No previous page");
                     return;
                 }
 
-                RemoveCurrentPageItems();
+                RemoveAllCards(true);
                 _currentPageId--;
                 DrawInventoryPage();
                 DrawPaginationButtons();
@@ -850,10 +792,11 @@ namespace Oxide.Plugins
             {
                 if (!HasNextPage() || !_isOpen)
                 {
+                    LogDebug("gMonetize_NextPage(): No next page");
                     return;
                 }
 
-                RemoveCurrentPageItems();
+                RemoveAllCards(true);
                 _currentPageId++;
                 DrawInventoryPage();
                 DrawPaginationButtons();
@@ -861,92 +804,51 @@ namespace Oxide.Plugins
 
             public void gMonetize_RedeemItemPending(string id)
             {
+                LogDebug("gMonetize_RedeemItemPending({0})", id);
                 if (!_isOpen)
-                    return;
-
-                var card = _cards.Find(x => x.EntryId == id);
-
-                if (card == null)
                 {
-                    throw new Exception("Failed to find rendered itemcard " + id);
+                    LogDebug("UI is not open");
+                    return;
                 }
 
-                var components = Pool.GetList<CuiElement>();
+                InventoryCard card;
+
+                if (!_idToCard.TryGetValue(id, out card))
+                {
+                    LogDebug("Failed to find rendered item card");
+                    return;
+                }
+
+                List<CuiElement> components = Pool.GetList<CuiElement>();
                 if (card.ChangeRedeemState(InventoryEntryRedeemState.PENDING, components))
                 {
                     CuiHelper.AddUi(_player, components);
                 }
-                else
-                {
-                    LogDebug("Called _RedeemItemPending, but state hasn't changed ({0})", id);
-                }
 
                 Pool.FreeList(ref components);
-
-                /*IEnumerable<CuiElement> elements = Builder.ItemCardButtonUpdate(
-                    id,
-                    InventoryEntryRedeemState.PENDING
-                );
-
-                CuiHelper.AddUi(_player, (List<CuiElement>)elements);*/
             }
 
             #endregion
 
             public APIClient.InventoryEntryDto GetCachedInventoryEntry(string id)
             {
-                if (_inventory == null)
-                {
-                    throw new InvalidOperationException("Inventory is null");
-                }
-
-                APIClient.InventoryEntryDto entry = _inventory.Find(e => e.id == id);
-
-                if (entry == null)
-                {
-                    throw new Exception(
-                        "Entry with id "
-                            + id
-                            + " was not found in inventory of player "
-                            + _player.IPlayer
-                    );
-                }
-
-                return entry;
+                return _idToDto[id];
             }
 
             private void CloseAndReleaseInventory()
             {
-                if (_isOpen)
+                if (!_isOpen)
                 {
-                    CuiHelper.DestroyUi(_player, Names.MAIN_BACKGROUND);
-                    _isOpen = false;
+                    return;
                 }
 
-                _cards.Clear();
+                CuiHelper.DestroyUi(_player, Names.MAIN_BACKGROUND);
+                RemoveAllCards(false);
                 _isItemListContainerDrawn = false;
                 _notificationState = NotificationState.None;
                 _inventory = null;
                 _currentPageId = 0;
-            }
-
-            private void RemoveCurrentPageItems()
-            {
-                foreach (var card in _cards)
-                {
-                    var uiName = Names.ItemCard(card.EntryId);
-                    CuiHelper.DestroyUi(_player, uiName.Container);
-                }
-
-                _cards.Clear();
-
-                /*foreach (
-                    Names.ItemCardName cardName in CurrentPageItems()
-                        .Select(item => Names.ItemCard(item.id))
-                )
-                {
-                    CuiHelper.DestroyUi(_player, cardName.Container);
-                }*/
+                _isOpen = false;
             }
 
             private void DrawPaginationButtons(bool firstTime = false)
@@ -988,8 +890,20 @@ namespace Oxide.Plugins
                     return;
                 }
 
+                RemoveAllCards(false);
                 CuiHelper.DestroyUi(_player, Names.ITEMLIST_CONTAINER);
                 _isItemListContainerDrawn = false;
+            }
+
+            private void RemoveAllCards(bool destroy)
+            {
+                if (destroy)
+                {
+                    _cards.ForEach(c => CuiHelper.DestroyUi(_player, c.UIName().Container));
+                }
+
+                _cards.Clear();
+                _idToCard.Clear();
             }
 
             private bool IsWipeBlocked(APIClient.InventoryEntryDto entry)
@@ -1077,11 +991,10 @@ namespace Oxide.Plugins
                 {
                     APIClient.InventoryEntryDto entry = itemList[i];
 
-                    var card = new InventoryCard(i, entry, GetRedeemState(entry));
-                    // IEnumerable<CuiElement> card = RenderItemCard(i, entry, GetRedeemState(entry));
-                    // componentList.AddRange();
+                    InventoryCard card = new InventoryCard(i, entry, GetRedeemState(entry));
                     card.Build(componentList);
                     _cards.Add(card);
+                    _idToCard.Add(entry.id, card);
                 }
 
                 LogDebug(
@@ -1090,53 +1003,8 @@ namespace Oxide.Plugins
                     componentList.Count
                 );
 
-                // LogDebug("Components json:\n{0}", CuiHelper.ToJson(componentList));
-
                 CuiHelper.AddUi(_player, componentList);
             }
-
-            /*private IEnumerable<CuiElement> RenderItemCard(
-                int containerIndex,
-                APIClient.InventoryEntryDto item,
-                InventoryEntryRedeemState redeemState
-            )
-            {
-                ICuiComponent icon;
-
-                int? amount = null;
-
-                if (item.type == APIClient.InventoryEntryDto.InventoryEntryType.ITEM)
-                {
-                    amount = item.item.amount;
-                }
-
-                if (item.iconId != null)
-                {
-                    icon = new CuiRawImageComponent
-                    {
-                        Url = APIClient.GetInventoryEntryIconUrl(item.iconId)
-                    };
-                }
-                else if (item.type == APIClient.InventoryEntryDto.InventoryEntryType.ITEM)
-                {
-                    icon = new CuiImageComponent { ItemId = item.item.itemId };
-                }
-                else
-                {
-                    icon = new CuiRawImageComponent { Url = Icons.ITEM_DEFAULT };
-                }
-
-                IEnumerable<CuiElement> card = Builder.ItemCard(
-                    containerIndex,
-                    item.id,
-                    item.name,
-                    amount,
-                    icon,
-                    redeemState
-                );
-
-                return card;
-            }*/
 
             #region Notifications
 
@@ -1157,6 +1025,10 @@ namespace Oxide.Plugins
                 if (_notificationState != NotificationState.None)
                 {
                     RemoveNotification();
+                }
+                else
+                {
+                    RemoveItemListContainer();
                 }
 
                 switch (state)
@@ -1270,9 +1142,11 @@ namespace Oxide.Plugins
                     IconComponent = CreateIconComponent(dto);
                 }
 
+                public Names.ItemCardName UIName() => Names.ItemCard(EntryId);
+
                 public void Build(List<CuiElement> components)
                 {
-                    var uiName = Names.ItemCard(EntryId);
+                    Names.ItemCardName uiName = Names.ItemCard(EntryId);
                     Builder.ItemCardContainer(uiName, ContainerIndex, components, false);
                     Builder.ItemCardStatic(
                         uiName,
@@ -1532,7 +1406,7 @@ namespace Oxide.Plugins
                                 new CuiButtonComponent
                                 {
                                     Color = bPrev ? COLOR_ENABLED : COLOR_DISABLED,
-                                    Command = CMD_PREV_PAGE
+                                    Command = bPrev ? CMD_PREV_PAGE : null
                                 },
                                 new CuiRectTransformComponent
                                 {
@@ -1568,7 +1442,7 @@ namespace Oxide.Plugins
                                 new CuiButtonComponent
                                 {
                                     Color = bNext ? COLOR_ENABLED : COLOR_DISABLED,
-                                    Command = CMD_NEXT_PAGE
+                                    Command = bNext ? CMD_NEXT_PAGE : null
                                 },
                                 new CuiRectTransformComponent
                                 {
@@ -2309,6 +2183,20 @@ Get icon: {6}
                 public TimeSpan? duration;
                 public int researchId;
 
+                public ItemDefinition GetItemDefinition()
+                {
+                    if (type == GoodObjectType.ITEM)
+                        return ItemManager.FindItemDefinition(itemId);
+                    if (type == GoodObjectType.RESEARCH)
+                        return ItemManager.FindItemDefinition(researchId);
+                    throw new InvalidOperationException();
+                }
+
+                public Item CreateItem()
+                {
+                    return ItemManager.Create(GetItemDefinition(), amount, meta.skinId ?? 0);
+                }
+
                 public enum GoodObjectType
                 {
                     ITEM,
@@ -2327,6 +2215,15 @@ Get icon: {6}
                 public int amount;
                 public ItemMetaDto meta;
 
+                public Item CreateItem()
+                {
+                    return ItemManager.Create(
+                        ItemManager.FindItemDefinition(itemId),
+                        amount,
+                        meta.skinId ?? 0
+                    );
+                }
+
                 public class ItemMetaDto
                 {
                     public ulong? skinId;
@@ -2339,6 +2236,11 @@ Get icon: {6}
                 public string name;
                 public string iconId;
                 public int researchId;
+
+                public ItemDefinition GetItemDefinition()
+                {
+                    return ItemManager.FindItemDefinition(researchId);
+                }
             }
 
             public class RankDto
