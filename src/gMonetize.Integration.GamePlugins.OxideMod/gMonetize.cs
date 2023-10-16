@@ -4,6 +4,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
+using System.Globalization;
 using System.Linq;
 using System.Text;
 using Facepunch;
@@ -14,6 +15,7 @@ using Oxide.Core.Libraries;
 using Oxide.Core.Libraries.Covalence;
 using Oxide.Game.Rust.Cui;
 using UnityEngine;
+// ReSharper disable CompareOfFloatsByEqualityOperator
 
 // ReSharper disable StringLiteralTypo
 // ReSharper disable IdentifierTypo
@@ -36,6 +38,29 @@ namespace Oxide.Plugins
         private const string CMD_PREV_PAGE = "gmonetize.prevpage";
         private const string CMD_RETRY_LOAD = "gmonetize.retryload";
         private const string CMD_REDEEM_ITEM = "gmonetize.redeemitem";
+
+        private static readonly string[] s_UserIdReplacers =
+        {
+            "${userid}",
+            "%STEAMID%",
+            "%userid%",
+            "${steamid}",
+            "$userid",
+            "$steamid",
+            "$player.id",
+            "$user.id"
+        };
+        private static readonly string[] s_UserNameReplacers =
+        {
+            "${username}",
+            "%USERNAME%",
+            "${displayname}",
+            "%displayname%",
+            "$username",
+            "$displayname",
+            "$player.name",
+            "$user.name"
+        };
 
         private static gMonetize Instance;
 
@@ -320,7 +345,7 @@ namespace Oxide.Plugins
                 case CMD_NEXT_PAGE:
                     basePlayer.SendMessage(nameof(UI.gMonetize_NextPage));
                     break;
-
+                case CMD_PREV_PAGE:
                     basePlayer.SendMessage(nameof(UI.gMonetize_PreviousPage));
                     break;
 
@@ -354,13 +379,23 @@ namespace Oxide.Plugins
                             UI component = basePlayer.GetComponent<UI>();
                             APIClient.InventoryEntryDto inventoryEntry =
                                 component.GetCachedInventoryEntry(inventoryEntryId);
-                            if (!TryGiveInventoryEntry(basePlayer, inventoryEntry))
+
+                            UI.InventoryEntryRedeemState redeemState = GetInventoryEntryRedeemState(
+                                basePlayer,
+                                inventoryEntry
+                            );
+
+                            if (!CanRedeemItemWithState(redeemState))
                             {
-                                component.gMonetize_RedeemItemGiveError(inventoryEntryId);
+                                component.gMonetize_RedeemItemGiveError(
+                                    inventoryEntry.id,
+                                    redeemState
+                                );
                             }
                             else
                             {
-                                component.gMonetize_RedeemItemOk(inventoryEntryId);
+                                IssueInventoryEntry(basePlayer, inventoryEntry);
+                                component.gMonetize_RedeemItemOk(inventoryEntry.id);
                             }
                         },
                         code =>
@@ -463,9 +498,365 @@ namespace Oxide.Plugins
 
         #endregion
 
-        private bool TryGetBasePlayer(IPlayer player, out BasePlayer basePlayer)
+        #region InventoryEntry issuing helpers
+
+        private void IssueInventoryEntry(BasePlayer player, APIClient.InventoryEntryDto entry)
         {
-            return (basePlayer = player.Object as BasePlayer) != null;
+            switch (entry.type)
+            {
+                case APIClient.InventoryEntryDto.InventoryEntryType.ITEM:
+                    IssueItemInventoryEntry(player, entry.item);
+                    break;
+                case APIClient.InventoryEntryDto.InventoryEntryType.RESEARCH:
+                    IssueResearchInventoryEntry(player, entry.research);
+                    break;
+                case APIClient.InventoryEntryDto.InventoryEntryType.KIT:
+                    IssueKitInventoryEntry(player, entry.contents);
+                    break;
+                case APIClient.InventoryEntryDto.InventoryEntryType.PERMISSION:
+                    IssuePermissionInventoryEntry(player, entry.permission);
+                    break;
+                case APIClient.InventoryEntryDto.InventoryEntryType.RANK:
+                    IssueGroupInventoryEntry(player, entry.rank);
+                    break;
+                case APIClient.InventoryEntryDto.InventoryEntryType.CUSTOM:
+                    IssueCustomInventoryEntry(player, entry.contents);
+                    break;
+            }
+        }
+
+        private void IssueCustomInventoryEntry(
+            BasePlayer player,
+            IEnumerable<APIClient.GoodObjectDto> contents
+        )
+        {
+            foreach (APIClient.GoodObjectDto good in contents)
+            {
+                switch (good.type)
+                {
+                    case APIClient.GoodObjectDto.GoodObjectType.ITEM:
+                        Item item = CreateItemFromDto(good);
+                        player.GiveItem(item, BaseEntity.GiveItemReason.PickedUp);
+                        break;
+                    case APIClient.GoodObjectDto.GoodObjectType.RESEARCH:
+                        ItemDefinition itemDef = good.GetItemDefinition();
+                        player.blueprints.Unlock(itemDef);
+                        break;
+                    case APIClient.GoodObjectDto.GoodObjectType.COMMAND:
+
+                        break;
+                    case APIClient.GoodObjectDto.GoodObjectType.PERMISSION:
+                        IssuePermissionInventoryEntry(player, good);
+                        break;
+                    case APIClient.GoodObjectDto.GoodObjectType.RANK:
+                        IssueGroupInventoryEntry(player, good);
+                        break;
+                    default:
+                        throw new ArgumentOutOfRangeException();
+                }
+            }
+        }
+
+        private void IssueCommandInventoryEntry(BasePlayer player, APIClient.GoodObjectDto dto)
+        {
+            string format = dto.value;
+
+            string command = ReplaceUserPlaceholders(player, format);
+
+            LogDebug(
+                "Executing command on player {0}: {1} => {2}",
+                player.IPlayer,
+                format,
+                command
+            );
+
+            server.Command(command);
+        }
+
+        private string ReplaceUserPlaceholders(BasePlayer player, string format)
+        {
+            string msg = format;
+
+            foreach (string replacer in s_UserIdReplacers)
+            {
+                msg = msg.Replace(
+                    replacer,
+                    player.UserIDString,
+                    StringComparison.OrdinalIgnoreCase
+                );
+            }
+
+            foreach (string replacer in s_UserNameReplacers)
+            {
+                msg = msg.Replace(replacer, player.displayName);
+            }
+
+            return msg;
+        }
+
+        private void IssuePermissionInventoryEntry(BasePlayer player, APIClient.PermissionDto dto)
+        {
+            _permissionsIntegrationModule.AddPermission(player.IPlayer, dto.value, dto.duration);
+        }
+
+        private void IssuePermissionInventoryEntry(BasePlayer player, APIClient.GoodObjectDto dto)
+        {
+            _permissionsIntegrationModule.AddPermission(player.IPlayer, dto.value, dto.duration);
+        }
+
+        private void IssueGroupInventoryEntry(BasePlayer player, APIClient.RankDto dto)
+        {
+            _permissionsIntegrationModule.AddGroup(player.IPlayer, dto.groupName, dto.duration);
+        }
+
+        private void IssueGroupInventoryEntry(BasePlayer player, APIClient.GoodObjectDto dto)
+        {
+            _permissionsIntegrationModule.AddGroup(player.IPlayer, dto.groupName, dto.duration);
+        }
+
+        private void IssueKitInventoryEntry(
+            BasePlayer player,
+            IEnumerable<APIClient.GoodObjectDto> contents
+        )
+        {
+            foreach (APIClient.GoodObjectDto good in contents)
+            {
+                if (good.type == APIClient.GoodObjectDto.GoodObjectType.ITEM)
+                {
+                    Item item = CreateItemFromDto(good);
+                    player.GiveItem(item, BaseEntity.GiveItemReason.PickedUp);
+                }
+                else
+                {
+                    ItemDefinition itemDef = good.GetItemDefinition();
+                    player.blueprints.Unlock(itemDef);
+                }
+            }
+        }
+
+        private Item CreateItemFromDto(APIClient.ItemDto dto)
+        {
+            ItemDefinition def = dto.GetItemDefinition();
+
+            Item item = ItemManager.Create(def, dto.amount, dto.meta.skinId ?? 0UL);
+            if (dto.meta.condition != 1.0f)
+            {
+                item.conditionNormalized = dto.meta.condition;
+            }
+
+            return item;
+        }
+
+        private Item CreateItemFromDto(APIClient.GoodObjectDto dto)
+        {
+            ItemDefinition def = dto.GetItemDefinition();
+
+            Item item = ItemManager.Create(def, dto.amount, dto.meta.skinId ?? 0UL);
+            if (dto.meta.condition != 1.0f)
+            {
+                item.conditionNormalized = dto.meta.condition;
+            }
+
+            return item;
+        }
+
+        private void IssueResearchInventoryEntry(BasePlayer player, APIClient.ResearchDto dto)
+        {
+            ItemDefinition itemDef = dto.GetItemDefinition();
+            player.blueprints.Unlock(itemDef);
+        }
+
+        private void IssueItemInventoryEntry(BasePlayer player, APIClient.ItemDto dto)
+        {
+            Item item = CreateItemFromDto(dto);
+
+            player.GiveItem(item, BaseEntity.GiveItemReason.PickedUp);
+        }
+
+        #endregion
+
+        #region Issuing availability helpers
+
+        private bool CanRedeemItemWithState(UI.InventoryEntryRedeemState state)
+        {
+            return state == UI.InventoryEntryRedeemState.READY
+                || state == UI.InventoryEntryRedeemState.FAILED;
+        }
+
+        private UI.InventoryEntryRedeemState GetInventoryEntryRedeemState(
+            BasePlayer player,
+            APIClient.InventoryEntryDto entry
+        )
+        {
+            UI.InventoryEntryRedeemState state;
+
+            if (IsWipeBlocked(entry))
+            {
+                state = UI.InventoryEntryRedeemState.WIPE_BLOCKED;
+            }
+            else
+            {
+                switch (entry.type)
+                {
+                    case APIClient.InventoryEntryDto.InventoryEntryType.ITEM:
+                        state = GetItemEntryRedeemState(player, entry);
+                        break;
+
+                    case APIClient.InventoryEntryDto.InventoryEntryType.KIT:
+                        state = GetKitEntryRedeemState(player, entry);
+                        break;
+
+                    case APIClient.InventoryEntryDto.InventoryEntryType.RESEARCH:
+                        state = GetResearchEntryRedeemState(player, entry);
+                        break;
+
+                    case APIClient.InventoryEntryDto.InventoryEntryType.CUSTOM:
+                        state = GetCustomEntryRedeemState(player, entry);
+                        break;
+
+                    default:
+                        state = UI.InventoryEntryRedeemState.READY;
+                        break;
+                }
+            }
+
+            return state;
+        }
+
+        private UI.InventoryEntryRedeemState GetCustomEntryRedeemState(
+            BasePlayer player,
+            APIClient.InventoryEntryDto entry
+        )
+        {
+            foreach (APIClient.GoodObjectDto good in entry.contents)
+            {
+                if (good.type == APIClient.GoodObjectDto.GoodObjectType.ITEM)
+                {
+                    ItemDefinition itemDef = good.GetItemDefinition();
+
+                    if (good.amount > GetMaxAmountOfItemAvailableToReceive(player, itemDef))
+                    {
+                        return UI.InventoryEntryRedeemState.NO_SPACE;
+                    }
+                }
+                else if (good.type == APIClient.GoodObjectDto.GoodObjectType.RESEARCH)
+                {
+                    ItemDefinition itemDef = good.GetItemDefinition();
+
+                    if (player.blueprints.IsUnlocked(itemDef))
+                    {
+                        return UI.InventoryEntryRedeemState.RESEARCHED;
+                    }
+                }
+            }
+
+            return UI.InventoryEntryRedeemState.READY;
+        }
+
+        private UI.InventoryEntryRedeemState GetKitEntryRedeemState(
+            BasePlayer player,
+            APIClient.InventoryEntryDto entry
+        )
+        {
+            foreach (APIClient.GoodObjectDto good in entry.contents)
+            {
+                ItemDefinition itemDef = good.GetItemDefinition();
+
+                if (good.type == APIClient.GoodObjectDto.GoodObjectType.ITEM)
+                {
+                    if (good.amount > GetMaxAmountOfItemAvailableToReceive(player, itemDef))
+                    {
+                        return UI.InventoryEntryRedeemState.NO_SPACE;
+                    }
+                }
+                else if (player.blueprints.IsUnlocked(itemDef))
+                {
+                    return UI.InventoryEntryRedeemState.RESEARCHED;
+                }
+            }
+
+            return UI.InventoryEntryRedeemState.READY;
+        }
+
+        private UI.InventoryEntryRedeemState GetResearchEntryRedeemState(
+            BasePlayer player,
+            APIClient.InventoryEntryDto research
+        )
+        {
+            ItemDefinition itemDef = research.research.GetItemDefinition();
+
+            return player.blueprints.IsUnlocked(itemDef)
+                ? UI.InventoryEntryRedeemState.RESEARCHED
+                : UI.InventoryEntryRedeemState.READY;
+        }
+
+        private UI.InventoryEntryRedeemState GetItemEntryRedeemState(
+            BasePlayer player,
+            APIClient.InventoryEntryDto item
+        )
+        {
+            UI.InventoryEntryRedeemState state;
+
+            ItemDefinition itemDef = item.item.GetItemDefinition();
+
+            int maxAmount = GetMaxAmountOfItemAvailableToReceive(player, itemDef);
+
+            if (item.item.amount <= maxAmount)
+            {
+                state = UI.InventoryEntryRedeemState.READY;
+            }
+            else
+            {
+                state = UI.InventoryEntryRedeemState.NO_SPACE;
+            }
+
+            return state;
+        }
+
+        private int GetInventoryFreeSlots(BasePlayer player)
+        {
+            ItemContainer cb = player.inventory.containerBelt;
+            ItemContainer cm = player.inventory.containerMain;
+
+            return (cb.capacity - cb.itemList.Count) + (cm.capacity - cm.itemList.Count);
+        }
+
+        private int GetAmountOfItemAvailableForStacking(
+            BasePlayer player,
+            ItemDefinition itemDefinition
+        )
+        {
+            int maxStack = itemDefinition.stackable;
+            List<Item> itemList = Pool.GetList<Item>();
+            itemList.AddRange(player.inventory.containerBelt.itemList);
+            itemList.AddRange(player.inventory.containerMain.itemList);
+
+            int availableAmount = 0;
+            foreach (Item item in itemList)
+            {
+                if (item.info != itemDefinition)
+                {
+                    continue;
+                }
+
+                availableAmount += maxStack - item.amount;
+            }
+
+            Pool.FreeList(ref itemList);
+
+            return availableAmount;
+        }
+
+        private int GetMaxAmountOfItemAvailableToReceive(
+            BasePlayer player,
+            ItemDefinition itemDefinition
+        )
+        {
+            int maxAvailableToStack = GetAmountOfItemAvailableForStacking(player, itemDefinition);
+            int freeSlots = GetInventoryFreeSlots(player);
+            int maxStack = itemDefinition.stackable;
+
+            return maxAvailableToStack + maxStack * freeSlots;
         }
 
         private bool IsWipeBlocked(APIClient.InventoryEntryDto inventoryEntry)
@@ -480,32 +871,16 @@ namespace Oxide.Plugins
             return inventoryEntry.wipeBlockDuration < timeSinceWipe;
         }
 
-        private bool HasEnoughSpace(BasePlayer player, APIClient.ItemDto dto)
+        #endregion
+
+        #region Generic helpers
+
+        private bool TryGetBasePlayer(IPlayer player, out BasePlayer basePlayer)
         {
-            ItemDefinition itemDef = ItemManager.FindItemDefinition(dto.itemId);
-            int maxStack = itemDef.stackable;
-
-            int requiredSlots = Mathf.CeilToInt((float)dto.amount / maxStack);
-            int freeSlots = GetPlayerFreeSlots(player);
-
-            if (freeSlots > requiredSlots)
-            {
-                return true;
-            }
-
-            List<Item> sameItems = player.inventory.FindItemsByItemID(dto.itemId);
-            int amountLeft = dto.amount - maxStack * freeSlots;
-
-            int sameItemsAmountLeft = sameItems.Select(item => maxStack - item.amount).Sum();
-            return sameItemsAmountLeft >= amountLeft;
+            return (basePlayer = player.Object as BasePlayer) != null;
         }
 
-        private int GetPlayerFreeSlots(BasePlayer player)
-        {
-            ItemContainer cm = player.inventory.containerMain;
-            ItemContainer cb = player.inventory.containerBelt;
-            return (cm.capacity - cm.itemList.Count) + (cb.capacity - cb.itemList.Count);
-        }
+        #endregion
 
         private class UI : FacepunchBehaviour
         {
@@ -627,7 +1002,7 @@ namespace Oxide.Plugins
                 }
 
                 _inventory.Remove(inventoryEntry);
-
+                
                 if (!_inventory.Any())
                 {
                     RemoveItemListContainer();
@@ -656,6 +1031,7 @@ namespace Oxide.Plugins
                     return;
                 }
 
+                CuiHelper.DestroyUi(_player, card.UIName().Container);
                 _idToCard.Remove(inventoryEntryId);
                 _cards.RemoveAt(card.ContainerIndex);
 
@@ -669,10 +1045,32 @@ namespace Oxide.Plugins
                     }
 
                     CuiHelper.AddUi(_player, components);
+
+                    Pool.FreeList(ref components);
                 }
+
+                InventoryCard lastCard = _cards.Last();
+                string lastCardEntryId = lastCard.EntryId;
+                APIClient.InventoryEntryDto lastCardDto = _idToDto[lastCardEntryId];
+                int lastCardDtoIndex = _inventory.IndexOf(lastCardDto);
+
+                if (lastCardDtoIndex == _inventory.Count-1)
+                {
+                    return;
+                }
+
+                APIClient.InventoryEntryDto nextCardDto = _inventory[lastCardDtoIndex + 1];
+
+                InventoryCard nextCard = new InventoryCard(_cards.Count, nextCardDto, Instance.GetInventoryEntryRedeemState(_player, nextCardDto));
+                _cards.Add(nextCard);
+                _idToCard.Add(nextCard.EntryId, nextCard);
+                List<CuiElement> cList = Pool.GetList<CuiElement>();
+                nextCard.Build(cList);
+                CuiHelper.AddUi(_player, cList);
+                Pool.FreeList(ref cList);
             }
 
-            public void gMonetize_RedeemItemGiveError(string id)
+            public void gMonetize_RedeemItemGiveError(string id, InventoryEntryRedeemState state)
             {
                 InventoryCard card = _cards.Find(x => x.EntryId == id);
 
@@ -847,6 +1245,7 @@ namespace Oxide.Plugins
                 _isItemListContainerDrawn = false;
                 _notificationState = NotificationState.None;
                 _inventory = null;
+                _idToDto.Clear();
                 _currentPageId = 0;
                 _isOpen = false;
             }
@@ -930,57 +1329,6 @@ namespace Oxide.Plugins
                 return _player.blueprints.IsUnlocked(itemDef);
             }
 
-            private InventoryEntryRedeemState GetRedeemState(APIClient.InventoryEntryDto entry)
-            {
-                if (IsWipeBlocked(entry))
-                {
-                    return InventoryEntryRedeemState.WIPE_BLOCKED;
-                }
-
-                if (
-                    entry.type == APIClient.InventoryEntryDto.InventoryEntryType.RESEARCH
-                    && IsResearched(entry.research)
-                )
-                {
-                    return InventoryEntryRedeemState.NO_SPACE;
-                }
-
-                if (
-                    entry.type == APIClient.InventoryEntryDto.InventoryEntryType.ITEM
-                    && Instance.GetPlayerAvailableSlots(_player) == 0
-                )
-                {
-                    return InventoryEntryRedeemState.NO_SPACE;
-                }
-
-                if (entry.type == APIClient.InventoryEntryDto.InventoryEntryType.KIT)
-                {
-                    if (
-                        entry.contents.All(
-                            x =>
-                                x.type == APIClient.GoodObjectDto.GoodObjectType.RESEARCH
-                                && _player.blueprints.IsUnlocked(
-                                    ItemManager.FindItemDefinition(x.researchId)
-                                )
-                        )
-                    )
-                    {
-                        return InventoryEntryRedeemState.NO_SPACE;
-                    }
-
-                    int requiredSlots = entry.contents.Count(
-                        x => x.type == APIClient.GoodObjectDto.GoodObjectType.ITEM
-                    );
-
-                    if (Instance.GetPlayerAvailableSlots(_player) < requiredSlots)
-                    {
-                        return InventoryEntryRedeemState.NO_SPACE;
-                    }
-                }
-
-                return InventoryEntryRedeemState.READY;
-            }
-
             private void DrawInventoryPage()
             {
                 DrawItemListContainer();
@@ -991,7 +1339,11 @@ namespace Oxide.Plugins
                 {
                     APIClient.InventoryEntryDto entry = itemList[i];
 
-                    InventoryCard card = new InventoryCard(i, entry, GetRedeemState(entry));
+                    InventoryCard card = new InventoryCard(
+                        i,
+                        entry,
+                        Instance.GetInventoryEntryRedeemState(_player, entry)
+                    );
                     card.Build(componentList);
                     _cards.Add(card);
                     _idToCard.Add(entry.id, card);
@@ -1984,10 +2336,11 @@ namespace Oxide.Plugins
                 public const string USER_NOT_FOUND = "https://i.imgur.com/yuGP7Lz.png";
             }
 
-            private enum InventoryEntryRedeemState
+            public enum InventoryEntryRedeemState
             {
                 READY,
                 NO_SPACE,
+                RESEARCHED,
                 WIPE_BLOCKED,
                 PENDING,
                 FAILED
@@ -2056,7 +2409,15 @@ Get icon: {6}
                     {
                         if (code == 200)
                         {
-                            okCb(JsonConvert.DeserializeObject<List<InventoryEntryDto>>(body));
+                            try
+                            {
+                                LogDebug("Deserializing inventory: {0}", body);
+                                okCb(JsonConvert.DeserializeObject<List<InventoryEntryDto>>(body));
+                            }
+                            catch
+                            {
+                                errorCb(500);
+                            }
                         }
                         else
                         {
@@ -2189,7 +2550,9 @@ Get icon: {6}
                         return ItemManager.FindItemDefinition(itemId);
                     if (type == GoodObjectType.RESEARCH)
                         return ItemManager.FindItemDefinition(researchId);
-                    throw new InvalidOperationException();
+                    throw new InvalidOperationException(
+                        "Cannot GetItemDefinition() on " + type.ToString("G") + " GoodObjectDto"
+                    );
                 }
 
                 public Item CreateItem()
@@ -2217,11 +2580,20 @@ Get icon: {6}
 
                 public Item CreateItem()
                 {
-                    return ItemManager.Create(
-                        ItemManager.FindItemDefinition(itemId),
-                        amount,
-                        meta.skinId ?? 0
-                    );
+                    return ItemManager.Create(GetItemDefinition(), amount, meta.skinId ?? 0);
+                }
+
+                public ItemDefinition GetItemDefinition()
+                {
+                    ItemDefinition itemDef = ItemManager.FindItemDefinition(itemId);
+                    if (!itemDef)
+                    {
+                        throw new Exception(
+                            "Failed to find ItemDefinition in the itemDTO: " + name + " " + itemId
+                        );
+                    }
+
+                    return itemDef;
                 }
 
                 public class ItemMetaDto
@@ -2239,7 +2611,18 @@ Get icon: {6}
 
                 public ItemDefinition GetItemDefinition()
                 {
-                    return ItemManager.FindItemDefinition(researchId);
+                    ItemDefinition itemDef = ItemManager.FindItemDefinition(researchId);
+                    if (!itemDef)
+                    {
+                        throw new Exception(
+                            "Failed to find ItemDefinition in the researchDTO: "
+                                + name
+                                + " "
+                                + researchId
+                        );
+                    }
+
+                    return itemDef;
                 }
             }
 
@@ -2332,7 +2715,7 @@ Get icon: {6}
                             case 'S':
                             case 'Z':
                                 partBuf = input.Substring(partStart, i - partStart);
-                                seconds = int.Parse(partBuf);
+                                seconds = (int)float.Parse(partBuf, CultureInfo.InvariantCulture);
                                 partStart = i + 1;
                                 if (c == 'Z')
                                 {
@@ -2391,35 +2774,9 @@ Get icon: {6}
 
         private interface IPermissionsIntegrationModule
         {
-            /// <summary>
-            /// Adds a permission to a player intefinitely
-            /// </summary>
-            /// <param name="player"></param>
-            /// <param name="permissionName"></param>
-            void AddPermission(IPlayer player, string permissionName);
+            void AddPermission(IPlayer player, string permissionName, TimeSpan? duration);
 
-            /// <summary>
-            /// Adds a permission to a player for certain amount of time
-            /// </summary>
-            /// <param name="player"></param>
-            /// <param name="permissionName"></param>
-            /// <param name="duration"></param>
-            void AddPermission(IPlayer player, string permissionName, TimeSpan duration);
-
-            /// <summary>
-            /// Adds player to a group indefinitely
-            /// </summary>
-            /// <param name="player"></param>
-            /// <param name="groupName"></param>
-            void AddGroup(IPlayer player, string groupName);
-
-            /// <summary>
-            /// Adds player to a group for certain amount of time
-            /// </summary>
-            /// <param name="player"></param>
-            /// <param name="groupName"></param>
-            /// <param name="duration"></param>
-            void AddGroup(IPlayer player, string groupName, TimeSpan duration);
+            void AddGroup(IPlayer player, string groupName, TimeSpan? duration);
         }
 
         private abstract class PermissionsIntegrationBase : IPermissionsIntegrationModule
@@ -2436,29 +2793,35 @@ Get icon: {6}
                 return true;
             }
 
-            public void AddPermission(IPlayer player, string permissionName)
+            public virtual void AddPermission(
+                IPlayer player,
+                string permissionName,
+                TimeSpan? duration
+            )
             {
+                if (duration.HasValue)
+                {
+                    throw new NotSupportedException();
+                }
+
                 if (!player.HasPermission(permissionName))
                 {
                     player.GrantPermission(permissionName);
                 }
             }
 
-            public abstract void AddPermission(
-                IPlayer player,
-                string permissionName,
-                TimeSpan duration
-            );
-
-            public void AddGroup(IPlayer player, string groupName)
+            public virtual void AddGroup(IPlayer player, string groupName, TimeSpan? duration)
             {
+                if (duration.HasValue)
+                {
+                    throw new NotSupportedException();
+                }
+
                 if (!player.BelongsToGroup(groupName))
                 {
                     player.AddToGroup(groupName);
                 }
             }
-
-            public abstract void AddGroup(IPlayer player, string groupName, TimeSpan duration);
         }
 
         private class NativePermissionsIntegration : PermissionsIntegrationBase
@@ -2469,13 +2832,13 @@ Get icon: {6}
             public override void AddPermission(
                 IPlayer player,
                 string permissionName,
-                TimeSpan duration
+                TimeSpan? duration
             )
             {
                 throw new NotImplementedException();
             }
 
-            public override void AddGroup(IPlayer player, string groupName, TimeSpan duration)
+            public override void AddGroup(IPlayer player, string groupName, TimeSpan? duration)
             {
                 throw new NotImplementedException();
             }
@@ -2507,20 +2870,25 @@ Get icon: {6}
             public override void AddPermission(
                 IPlayer player,
                 string permissionName,
-                TimeSpan duration
+                TimeSpan? duration
             )
             {
                 plugin.server.Command(
                     "grantperm",
                     player.Id,
                     permissionName,
-                    FormatDuration(duration)
+                    FormatDuration(duration.Value)
                 );
             }
 
-            public override void AddGroup(IPlayer player, string groupName, TimeSpan duration)
+            public override void AddGroup(IPlayer player, string groupName, TimeSpan? duration)
             {
-                plugin.server.Command("addgroup", player.Id, groupName, FormatDuration(duration));
+                plugin.server.Command(
+                    "addgroup",
+                    player.Id,
+                    groupName,
+                    FormatDuration(duration.Value)
+                );
             }
 
             protected string FormatDuration(TimeSpan timeSpan)
