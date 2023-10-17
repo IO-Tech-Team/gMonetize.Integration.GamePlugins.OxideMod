@@ -8,11 +8,14 @@ using System.Globalization;
 using System.Linq;
 using System.Text;
 using Facepunch;
+using JetBrains.Annotations;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Converters;
 using Oxide.Core;
+using Oxide.Core.Configuration;
 using Oxide.Core.Libraries;
 using Oxide.Core.Libraries.Covalence;
+using Oxide.Core.Plugins;
 using Oxide.Game.Rust.Cui;
 using UnityEngine;
 // ReSharper disable CompareOfFloatsByEqualityOperator
@@ -234,6 +237,8 @@ namespace Oxide.Plugins
         {
             APIClient.Init(_settings.ApiUrl, _settings.ApiKey);
 
+            LoadPermissionsIntegrationModule();
+
             if (
                 string.IsNullOrWhiteSpace(_settings.ApiKey)
                 || _settings.ApiKey == PluginSettings.GetDefaults().ApiKey
@@ -282,6 +287,8 @@ namespace Oxide.Plugins
             {
                 OnUserDisconnected(player);
             }
+
+            _permissionsIntegrationModule.OnSave();
         }
 
         #endregion
@@ -456,15 +463,17 @@ namespace Oxide.Plugins
                     _permissionsIntegrationModule = AutoChoosePermissionsIntegrationModule();
                     break;
                 case PluginSettings.PermissionGiveMethod.Internal:
-                    _permissionsIntegrationModule = new NativePermissionsIntegration(this);
+                    _permissionsIntegrationModule = new NativePermissionsIntegration();
                     break;
                 case PluginSettings.PermissionGiveMethod.TimedPermissions:
-                    _permissionsIntegrationModule = new TimedPermissionsIntegration(this);
+                    _permissionsIntegrationModule = new TimedPermissionsIntegration();
                     break;
                 case PluginSettings.PermissionGiveMethod.IQPermissions:
-                    _permissionsIntegrationModule = new IQPermissionsIntegration(this);
+                    _permissionsIntegrationModule = new IQPermissionsIntegration();
                     break;
             }
+
+            _permissionsIntegrationModule.OnLoad();
 
             LogDebug(
                 "Permissions integration module: {0}",
@@ -479,7 +488,7 @@ namespace Oxide.Plugins
                 LogDebug(
                     "Choosing TimedPermissions integration module as IPermissionsIntegrationModule, based on loaded TimedPermissions plugin"
                 );
-                return new TimedPermissionsIntegration(this);
+                return new TimedPermissionsIntegration();
             }
 
             if (plugins.Find("IQPermissions") != null)
@@ -487,13 +496,13 @@ namespace Oxide.Plugins
                 LogDebug(
                     "Choosing IQPermissions integration module as IPermissionsIntegrationModule, based on loaded IQPermissions plugin"
                 );
-                return new IQPermissionsIntegration(this);
+                return new IQPermissionsIntegration();
             }
 
             LogDebug(
                 "Choosing native permissions integration module as IPermissionsIntegrationModule, because permission plugins were not found"
             );
-            return new NativePermissionsIntegration(this);
+            return new NativePermissionsIntegration();
         }
 
         #endregion
@@ -882,6 +891,34 @@ namespace Oxide.Plugins
 
         #endregion
 
+        #region Public API
+
+        [HookMethod(nameof(gMonetize_GetCustomerBalance))]
+        public void gMonetize_GetCustomerBalance(
+            [System.Diagnostics.CodeAnalysis.NotNull]
+            string userId,
+            [System.Diagnostics.CodeAnalysis.NotNull]
+            Action<long> onBalanceReceived,
+            [CanBeNull] Action<int> onError
+        )
+        {
+            APIClient.GetCustomerBalance(userId, onBalanceReceived, onError ?? (_ => { }));
+        }
+
+        [HookMethod(nameof(gMonetize_SetCustomerBalance))]
+        void gMonetize_SetCustomerBalance(
+            [System.Diagnostics.CodeAnalysis.NotNull]
+            string userId,
+            long value,
+            [CanBeNull] Action onOk,
+            [CanBeNull] Action<int> onError
+        )
+        {
+            APIClient.SetCustomerBalance(userId, value, onOk ?? (() => { }), onError ?? (x => { }));
+        }
+
+        #endregion
+
         private class UI : FacepunchBehaviour
         {
             private const int ITEMS_PER_PAGE = Builder.CARD_COUNT;
@@ -1002,7 +1039,7 @@ namespace Oxide.Plugins
                 }
 
                 _inventory.Remove(inventoryEntry);
-                
+
                 if (!_inventory.Any())
                 {
                     RemoveItemListContainer();
@@ -1054,14 +1091,18 @@ namespace Oxide.Plugins
                 APIClient.InventoryEntryDto lastCardDto = _idToDto[lastCardEntryId];
                 int lastCardDtoIndex = _inventory.IndexOf(lastCardDto);
 
-                if (lastCardDtoIndex == _inventory.Count-1)
+                if (lastCardDtoIndex == _inventory.Count - 1)
                 {
                     return;
                 }
 
                 APIClient.InventoryEntryDto nextCardDto = _inventory[lastCardDtoIndex + 1];
 
-                InventoryCard nextCard = new InventoryCard(_cards.Count, nextCardDto, Instance.GetInventoryEntryRedeemState(_player, nextCardDto));
+                InventoryCard nextCard = new InventoryCard(
+                    _cards.Count,
+                    nextCardDto,
+                    Instance.GetInventoryEntryRedeemState(_player, nextCardDto)
+                );
                 _cards.Add(nextCard);
                 _idToCard.Add(nextCard.EntryId, nextCard);
                 List<CuiElement> cList = Pool.GetList<CuiElement>();
@@ -2471,9 +2512,22 @@ Get icon: {6}
                 throw new NotImplementedException();
             }
 
-            public static void SetCustomerBalance(string userId, Action okCb, Action<int> errorCb)
+            public static void SetCustomerBalance(string userId, long value, Action okCb, Action<int> errorCb)
             {
-                throw new NotImplementedException();
+                string payload = JsonConvert.SerializeObject(new { value });
+
+                Instance.webrequest.Enqueue(s_BalanceUrl, payload, (code, _) =>
+                    {
+                        if (code != 204)
+                        {
+                            errorCb(code);
+                        }
+                        else
+                        {
+                            okCb();
+                        }
+                    }, Instance,
+                    RequestMethod.PATCH, GetRequestHeaders(userId ));
             }
 
             public static void CreateCustomerInventoryEntry(
@@ -2777,119 +2831,207 @@ Get icon: {6}
             void AddPermission(IPlayer player, string permissionName, TimeSpan? duration);
 
             void AddGroup(IPlayer player, string groupName, TimeSpan? duration);
+
+            void OnSave();
+            void OnLoad();
         }
 
-        private abstract class PermissionsIntegrationBase : IPermissionsIntegrationModule
+        private class NativePermissionsIntegration : IPermissionsIntegrationModule
         {
-            protected readonly gMonetize plugin;
+            private List<PersistedPermission> _permissions;
+            private Timer _updateTimer;
 
-            public PermissionsIntegrationBase(gMonetize plugin)
+            public void OnLoad()
             {
-                plugin = plugin;
-            }
+                DynamicConfigFile dcf = Interface.Oxide.DataFileSystem.GetFile(
+                    "gmonetize_v2/permission_persistence"
+                );
 
-            public virtual bool ValidateRequirements()
-            {
-                return true;
-            }
-
-            public virtual void AddPermission(
-                IPlayer player,
-                string permissionName,
-                TimeSpan? duration
-            )
-            {
-                if (duration.HasValue)
+                if (dcf.Exists())
                 {
-                    throw new NotSupportedException();
+                    try
+                    {
+                        _permissions = dcf.ReadObject<List<PersistedPermission>>();
+                        if (_permissions == null)
+                        {
+                            throw new Exception();
+                        }
+
+                        return;
+                    }
+                    catch { }
                 }
 
-                if (!player.HasPermission(permissionName))
+                _permissions = new List<PersistedPermission>();
+
+                _updateTimer = Instance.timer.Every(10f, CheckExpired);
+            }
+
+            private void CheckExpired()
+            {
+                for (int i = _permissions.Count - 1; i >= 0; i--)
+                {
+                    PersistedPermission perm = _permissions[i];
+                    if (perm.HasExpired())
+                    {
+                        RemovePerm(perm);
+                        _permissions.RemoveAt(i);
+                    }
+                }
+            }
+
+            private void RemovePerm(PersistedPermission permission)
+            {
+                IPlayer player = Instance.players.FindPlayerById(permission.UserId);
+                if (permission.IsGroup)
+                {
+                    player.RemoveFromGroup(permission.Name);
+                }
+                else
+                {
+                    player.RevokePermission(permission.Name);
+                }
+            }
+
+            public void OnSave()
+            {
+                DynamicConfigFile dcf = Interface.Oxide.DataFileSystem.GetFile(
+                    "gmonetize_v2/permission_persistence"
+                );
+
+                dcf.WriteObject(_permissions);
+            }
+
+            public void AddPermission(IPlayer player, string permissionName, TimeSpan? duration)
+            {
+                if (!duration.HasValue)
+                {
+                    LogDebug(
+                        "Granting permission {0} to player {1} (infinite)",
+                        permissionName,
+                        player
+                    );
+                    player.GrantPermission(permissionName);
+                }
+                else
+                {
+                    LogDebug(
+                        "Granting permission {0} to player {1} for {2}",
+                        permissionName,
+                        player,
+                        duration.Value
+                    );
+                    player.GrantPermission(permissionName);
+                    PersistedPermission perm = _permissions.Find(
+                        x => x.Name == permissionName && !x.IsGroup && x.UserId == player.Id
+                    );
+                    if (perm != null)
+                    {
+                        perm.ExpiresAt += duration.Value;
+                    }
+                    else
+                    {
+                        perm = new PersistedPermission
+                        {
+                            Name = permissionName,
+                            ExpiresAt = DateTimeOffset.Now + duration.Value
+                        };
+                        _permissions.Add(perm);
+                    }
+                }
+            }
+
+            public void AddGroup(IPlayer player, string groupName, TimeSpan? duration)
+            {
+                if (!duration.HasValue)
+                {
+                    LogDebug("Adding player {0} to group {1} (infinite)", player, groupName);
+                    player.AddToGroup(groupName);
+                }
+                else
+                {
+                    LogDebug(
+                        "Adding player {0} to group {1} for {2}",
+                        player,
+                        groupName,
+                        duration.Value
+                    );
+                    player.AddToGroup(groupName);
+                    PersistedPermission group = _permissions.Find(
+                        x => x.Name == groupName && x.IsGroup && x.UserId == player.Id
+                    );
+                    if (group != null)
+                    {
+                        group.ExpiresAt += duration.Value;
+                    }
+                    else
+                    {
+                        group = new PersistedPermission
+                        {
+                            Name = groupName,
+                            UserId = player.Id,
+                            ExpiresAt = DateTimeOffset.Now + duration.Value,
+                            IsGroup = true
+                        };
+                        _permissions.Add(group);
+                    }
+                }
+            }
+
+            private class PersistedPermission
+            {
+                public string Name { get; set; }
+                public string UserId { get; set; }
+                public bool IsGroup { get; set; }
+                public DateTimeOffset ExpiresAt { get; set; }
+
+                public TimeSpan GetTimeLeft() => ExpiresAt - DateTimeOffset.Now;
+
+                public bool HasExpired() => GetTimeLeft() <= TimeSpan.Zero;
+            }
+        }
+
+        private class TimedPermissionsIntegration : IPermissionsIntegrationModule
+        {
+            private StringBuilder _fmtSb = new StringBuilder();
+
+            public void AddPermission(IPlayer player, string permissionName, TimeSpan? duration)
+            {
+                if (!duration.HasValue)
                 {
                     player.GrantPermission(permissionName);
                 }
+                else
+                {
+                    Instance.server.Command(
+                        "grantperm",
+                        player.Id,
+                        permissionName,
+                        FormatDuration(duration.Value)
+                    );
+                }
             }
 
-            public virtual void AddGroup(IPlayer player, string groupName, TimeSpan? duration)
+            public void AddGroup(IPlayer player, string groupName, TimeSpan? duration)
             {
-                if (duration.HasValue)
-                {
-                    throw new NotSupportedException();
-                }
-
-                if (!player.BelongsToGroup(groupName))
+                if (!duration.HasValue)
                 {
                     player.AddToGroup(groupName);
                 }
-            }
-        }
-
-        private class NativePermissionsIntegration : PermissionsIntegrationBase
-        {
-            public NativePermissionsIntegration(gMonetize plugin)
-                : base(plugin) { }
-
-            public override void AddPermission(
-                IPlayer player,
-                string permissionName,
-                TimeSpan? duration
-            )
-            {
-                throw new NotImplementedException();
-            }
-
-            public override void AddGroup(IPlayer player, string groupName, TimeSpan? duration)
-            {
-                throw new NotImplementedException();
-            }
-        }
-
-        private class TimedPermissionsIntegration : PermissionsIntegrationBase
-        {
-            private StringBuilder _fmtSb;
-
-            public TimedPermissionsIntegration(gMonetize plugin)
-                : base(plugin)
-            {
-                _fmtSb = new StringBuilder();
-            }
-
-            public override bool ValidateRequirements()
-            {
-                if (plugin.plugins.Find("TimedPermissions") == null)
+                else
                 {
-                    plugin.LogWarning(
-                        "Permissions integration module warning: TimedPermissions was not found"
+                    Instance.server.Command(
+                        "addgroup",
+                        player.Id,
+                        groupName,
+                        FormatDuration(duration.Value)
                     );
-                    return false;
                 }
-
-                return true;
             }
 
-            public override void AddPermission(
-                IPlayer player,
-                string permissionName,
-                TimeSpan? duration
-            )
-            {
-                plugin.server.Command(
-                    "grantperm",
-                    player.Id,
-                    permissionName,
-                    FormatDuration(duration.Value)
-                );
-            }
+            public void OnSave() { }
 
-            public override void AddGroup(IPlayer player, string groupName, TimeSpan? duration)
-            {
-                plugin.server.Command(
-                    "addgroup",
-                    player.Id,
-                    groupName,
-                    FormatDuration(duration.Value)
-                );
-            }
+            public void OnLoad() { }
 
             protected string FormatDuration(TimeSpan timeSpan)
             {
@@ -2919,23 +3061,6 @@ Get icon: {6}
             }
         }
 
-        private class IQPermissionsIntegration : TimedPermissionsIntegration
-        {
-            public IQPermissionsIntegration(gMonetize plugin)
-                : base(plugin) { }
-
-            public override bool ValidateRequirements()
-            {
-                if (plugin.plugins.Find("IQPermissions") == null)
-                {
-                    plugin.LogWarning(
-                        "Permissions integration module warning: IQPermissions was not found"
-                    );
-                    return false;
-                }
-
-                return true;
-            }
-        }
+        private class IQPermissionsIntegration : TimedPermissionsIntegration { }
     }
 }
