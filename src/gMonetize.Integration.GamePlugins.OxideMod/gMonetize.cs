@@ -1,4 +1,4 @@
-﻿// #define DEBUG
+﻿#define DEBUG
 
 using System;
 using System.Collections.Generic;
@@ -28,7 +28,7 @@ namespace Oxide.Plugins
 {
     // ReSharper disable once InconsistentNaming
     // ReSharper disable once ClassNeverInstantiated.Global
-    [Info("gMonetize", "gMonetize Project", "2.0.0")]
+    [Info("gMonetize", "gMonetize Project", "2.0.1")]
     [Description("gMonetize integration with OxideMod")]
     [SuppressMessage("ReSharper", "UnusedMember.Local")]
     [SuppressMessage("ReSharper", "MemberCanBePrivate.Local")]
@@ -94,11 +94,11 @@ namespace Oxide.Plugins
 
             try
             {
-                _settings = Config.ReadObject<PluginSettings>();
-                APIClient.Init(_settings.ApiUrl, _settings.ApiKey);
+                _settings = Config.ReadObject<PluginSettings>(); // 
             }
-            catch
+            catch(Exception e)
             {
+                LogError("Failed to load configuration: {0}", e.ToString());
                 LoadDefaultConfig();
             }
         }
@@ -238,16 +238,6 @@ namespace Oxide.Plugins
             APIClient.Init(_settings.ApiUrl, _settings.ApiKey);
 
             LoadPermissionsIntegrationModule();
-
-            if (
-                string.IsNullOrWhiteSpace(_settings.ApiKey)
-                || _settings.ApiKey == PluginSettings.GetDefaults().ApiKey
-            )
-            {
-                LogWarning(
-                    "API key was not set up properly. You have to specify it to allow plugin to communicate with gMonetize API"
-                );
-            }
 
             foreach (IPlayer player in players.Connected)
             {
@@ -529,6 +519,7 @@ namespace Oxide.Plugins
                     IssueGroupInventoryEntry(player, entry.rank);
                     break;
                 case APIClient.InventoryEntryDto.InventoryEntryType.CUSTOM:
+                    LogDebug("Issuing custom inventory entry {0} to player {1}", entry.id, player);
                     IssueCustomInventoryEntry(player, entry.contents);
                     break;
             }
@@ -552,7 +543,7 @@ namespace Oxide.Plugins
                         player.blueprints.Unlock(itemDef);
                         break;
                     case APIClient.GoodObjectDto.GoodObjectType.COMMAND:
-
+                        IssueCommandInventoryEntry(player, good);
                         break;
                     case APIClient.GoodObjectDto.GoodObjectType.PERMISSION:
                         IssuePermissionInventoryEntry(player, good);
@@ -887,6 +878,13 @@ namespace Oxide.Plugins
         private bool TryGetBasePlayer(IPlayer player, out BasePlayer basePlayer)
         {
             return (basePlayer = player.Object as BasePlayer) != null;
+        }
+
+        private bool IsApiKeySetup()
+        {
+            return !string.IsNullOrEmpty(_settings.ApiKey) &&
+                   !_settings.ApiKey.Equals(PluginSettings.GetDefaults().ApiKey,
+                       StringComparison.OrdinalIgnoreCase);
         }
 
         #endregion
@@ -2406,6 +2404,11 @@ namespace Oxide.Plugins
 
             public static void Init(string apiUrl, string apiKey)
             {
+                if (!Instance.IsApiKeySetup())
+                {
+                    Instance.LogError("API key was not set up properly. You have to specify it to allow plugin to communicate with gMonetize API");
+                }
+                
                 s_RequestHeaders["Content-Type"] = "application/json";
                 s_RequestHeaders["Authorization"] = $"Bearer {apiKey}";
                 s_RequestHeaders["X-USER-PLATFORM"] = "STEAM";
@@ -2443,11 +2446,17 @@ Get icon: {6}
                 Action<int> errorCb
             )
             {
+
+                var headers = GetRequestHeaders(userId);
+                
+                LogDebug("GetPlayerInventory headers: {0}", JsonConvert.SerializeObject(headers));
+                
                 Instance.webrequest.Enqueue(
                     s_InventoryUrl,
                     null,
                     (code, body) =>
                     {
+                        LogDebug("GetPlayerInventory response: {0} {1}", code, body);
                         if (code == 200)
                         {
                             try
@@ -2467,7 +2476,7 @@ Get icon: {6}
                     },
                     Instance,
                     RequestMethod.GET,
-                    GetRequestHeaders(userId)
+                    headers
                 );
             }
 
