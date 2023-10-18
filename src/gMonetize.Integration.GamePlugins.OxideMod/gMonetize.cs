@@ -28,7 +28,7 @@ namespace Oxide.Plugins
 {
     // ReSharper disable once InconsistentNaming
     // ReSharper disable once ClassNeverInstantiated.Global
-    [Info("gMonetize", "gMonetize Project", "2.0.1")]
+    [Info("gMonetize", "gMonetize Project", "2.0.3")]
     [Description("gMonetize integration with OxideMod")]
     [SuppressMessage("ReSharper", "UnusedMember.Local")]
     [SuppressMessage("ReSharper", "MemberCanBePrivate.Local")]
@@ -94,7 +94,13 @@ namespace Oxide.Plugins
 
             try
             {
-                _settings = Config.ReadObject<PluginSettings>(); // 
+                _settings = Config.ReadObject<PluginSettings>();
+
+                LogDebug("Configuration values:");
+                foreach (KeyValuePair<string,object> keyValuePair in Config)
+                {
+                    LogDebug("{0} = {1}", keyValuePair.Key, keyValuePair.Value);
+                }
             }
             catch(Exception e)
             {
@@ -294,14 +300,16 @@ namespace Oxide.Plugins
             covalence.RegisterCommand(CMD_RETRY_LOAD, this, HandleCommand);
             covalence.RegisterCommand(CMD_REDEEM_ITEM, this, HandleCommand);
 
-            foreach (string command in _settings.ChatCommands)
+            if (_settings.ChatCommands == null || _settings.ChatCommands.Length == 0)
             {
-                covalence.RegisterCommand(command, this, HandleCommand);
+                LogWarning("Plugin lacks chat commands in the configuration. UI will not be available for players!");
             }
-
-            if (_settings.ChatCommands.Length == 0)
+            else
             {
-                LogWarning("No chat commands were registered");
+                foreach (string command in _settings.ChatCommands)
+                {
+                    covalence.RegisterCommand(command, this, HandleCommand);
+                }    
             }
         }
 
